@@ -13,11 +13,11 @@ The connector will allow users to:
 3. Interact with the generated TDEs in Tableau Desktop
 4. Publish the data source to Tableau Online & Server
 5. In Tableau Online & Server successfully execute full refreshes on the data source extract.
-This will allow the users to have Tableau Online & Server pull “fresh data daily” from their account. This document outlines the delivery requirements of the DHIS2 Web Data Connector (WDC).
+This will allow the users to have Tableau Online & Server pull “fresh data daily” from their account.
 
 ## Setup
 
-Refer to Tableau Web Data Connector [http://tableau.github.io/webdataconnector/](documentation hub) for WDC specifics.
+Refer to Tableau Web Data Connector [documentation hub](http://tableau.github.io/webdataconnector/) for WDC specifics.
 
 To get an interactive development environment run:
 
