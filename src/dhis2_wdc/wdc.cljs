@@ -38,6 +38,7 @@
                                              ::tables
                                              ::joins]))
 (s/def ::standardConnections (s/coll-of ::standardConnection))
+(s/def ::phase #{"auth" "interactive" "gatherData"})
 
 (defprotocol IWebDataConnector
   "Web Data Connector protocol"
@@ -45,27 +46,25 @@
   (-get-table-infos [this] "Array of TableInfo objects")
   (-get-standard-connections [this] "Array of StandardConnection objects (describing predefined table joins) (optional)")
   (-get-rows [this table-info] "core.async/channel containing retrieved table rows")
-  (-get-state [this] "State which need to be persisted when the current WDC phase ends")
-  (-set-state [this state] "Accept state which was persisted when the previous phase ended"))
+  (-shutdown [this] "Called when the current WDC phase ends. Must return state which need to be persisted.")
+  (-init [this phase state] "Called when a new WDC phase is entered. State saved at the end of previous phase is provided."))
 
 (defn get-phase []
   "Returns the current WDC phase"
-  (.-phase js/tableau))
-
-(defn in-auth-phase? [] (= "authPhase" (get-phase)))
-(defn in-gather-data-phase? [] (= "gatherDataPhase" (get-phase)))
-(defn in-interactive-phase? [] (= "interactivePhase" (get-phase)))
+  (when-let [phase (.-phase js/tableau)]
+    (s/assert ::phase phase)))
 
 (defn- init [w callback]
-  (println (str "Entering phase: " (get-phase)))
-  (let [s (aget js/tableau "connectionData")
+  (let [phase (get-phase)
+        s (aget js/tableau "connectionData")
         state (if-not (empty? s) (js->clj (.parse js/JSON s) :keywordize-keys true))]
-    (when state (-set-state w state)))
+    (println (str "Entering phase: " phase))
+    (-init w phase state))
   (callback))
 
 (defn- shutdown [w callback]
   (println (str "Exiting phase: " (get-phase)))
-  (when-let [state (-get-state w)]
+  (when-let [state (-shutdown w)]
     (->> state
          clj->js
          (.stringify js/JSON)
@@ -96,8 +95,8 @@
           (aset "shutdown" (partial shutdown w))
           (aset "getSchema" (partial get-schema w))
           (aset "getData" (partial get-data w)))]
-    (aset js/tableau "connectionName" (-get-name w))
-    (.registerConnector js/tableau connector)))
+    (.registerConnector js/tableau connector))
+  (aset js/tableau "connectionName" (-get-name w)))
 
 (defn go! [w]
   "Transitions from WDC 'interactive' phase to 'gather data' phase"

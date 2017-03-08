@@ -6,57 +6,70 @@
             [cljs.core.async :as async]))
 
 (enable-console-print!)
+(declare render)
 
-(deftype DHIS2WDC []
+(defn response->rows [response]
+  (->> response
+       :body
+       :features
+       (map (fn [feat]
+              {:id    (feat :id)
+               :mag   (get-in feat [:properties :mag])
+               :title (get-in feat [:properties :title])
+               :lon   (first (get-in feat [:geometry :coordinates]))
+               :lat   (second (get-in feat [:geometry :coordinates]))}))))
+
+(deftype DHIS2WDC [state]
     wdc/IWebDataConnector
     (-get-name [this]
-      "DHIS2 Web Data Connector")
+      (:name @state))
     (-get-table-infos [this]
-      [{:id      "earthquakeFeed"
-        :alias   "Earthquakes with magnitude greater than 4.5 in the last seven days"
-        :columns [{:id       "id"
-                   :dataType "string"}
-                  {:id       "mag"
-                   :alias    "magnitude"
-                   :dataType "float"}
-                  {:id       "title"
-                   :dataType "string"}
-                  {:id       "lat"
-                   :dataType "float"}
-                  {:id       "lon"
-                   :dataType "float"}]}])
+      [(:table-info @state)])
     (-get-standard-connections [this]
       [])
     (-get-rows [this table-info]
-      (let [rows-chan (async/chan 1)
-            url "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_week.geojson"
-            response-chan (http/get url {:with-credentials? false})
-            response->rows (fn [response]
-                             (->> response
-                                  :body
-                                  :features
-                                  (map (fn [feat]
-                                         {:id    (feat :id)
-                                          :mag   (get-in feat [:properties :mag])
-                                          :title (get-in feat [:properties :title])
-                                          :lon   (first (get-in feat [:geometry :coordinates]))
-                                          :lat   (second (get-in feat [:geometry :coordinates]))}))))]
+      (let [rows (async/chan 1)
+            url (:url @state)
+            response (http/get url {:with-credentials? false})]
         (async/go
-          (->> (async/<! response-chan)
+          (->> (async/<! response)
                (response->rows)
-               (async/>! rows-chan)))
-        rows-chan))
-    (-get-state [this])
-    (-set-state [this state]))
+               (async/>! rows)))
+        rows))
+    (-shutdown [this]
+      @state)
+    (-init [this phase a-state]
+      (swap! state merge a-state)
+      (when (= "interactive" phase)
+        (render))))
 
-(def *wdc* (DHIS2WDC.))
-(wdc/register! *wdc*)
+(defn make-state []
+  {:name "Web Data Connector"
+   :url "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_week.geojson"
+   :table-info {:id      "earthquakeFeed"
+                :alias   "Earthquakes with magnitude greater than 4.5 in the last seven days"
+                :columns [{:id       "id"
+                           :dataType "string"}
+                          {:id       "mag"
+                           :alias    "magnitude"
+                           :dataType "float"}
+                          {:id       "title"
+                           :dataType "string"}
+                          {:id       "lat"
+                           :dataType "float"}
+                          {:id       "lon"
+                           :dataType "float"}]}})
+
+(def app-state (r/atom (make-state)))
+(def wdc (DHIS2WDC. app-state))
+(wdc/register! wdc)
 
 (defn root-component []
-  [:input {:type "button" :value "Go!" :on-click #(wdc/go! *wdc*)}])
+  [:input {:type "button" :value "Go!" :on-click #(wdc/go! wdc)}])
 
-(r/render-component [root-component]
-                          (. js/document (getElementById "app")))
+(defn render []
+  (r/render-component [root-component]
+                      (. js/document (getElementById "app"))))
 
 (defn on-js-reload []
   ;; optionally touch your app-state to force rerendering depending on
