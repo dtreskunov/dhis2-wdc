@@ -7,7 +7,7 @@
   :min-lein-version "2.7.1"
 
   :dependencies [[org.clojure/clojure "1.9.0-alpha14"]
-                 [org.clojure/clojurescript "1.9.495"]
+                 [org.clojure/clojurescript "1.9.229"]
                  [org.clojure/core.async "0.3.441" :exclusions [org.clojure/tools.reader]]
                  [reagent "0.6.0"]
                  [cljs-http "0.1.42"]]
