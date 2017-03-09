@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e # Exit with nonzero exit code if anything fails
+shopt -s extglob # enable extended glob
 
 SOURCE_BRANCH="master"
 TARGET_BRANCH="gh-pages"
@@ -23,11 +24,11 @@ git checkout $TARGET_BRANCH || git checkout --orphan $TARGET_BRANCH
 cd ..
 
 # Clean out existing contents
-rm -rf out/**/* || exit 0
+rm -rf out/!(.|..|.git) || exit 0
 
 # Run our compile script
 #doCompile
-cp -r resources/public/* out
+cp -r ${DEPLOY_FROM}/* out
 
 # Now let's go have some fun with the cloned repo
 cd out
@@ -35,7 +36,7 @@ git config user.name "Travis CI"
 git config user.email "$COMMIT_AUTHOR_EMAIL"
 
 # If there are no changes to the compiled out (e.g. this is a README update) then just bail.
-if [ -z `git diff --exit-code` ]; then
+if [ -z "$(git status --porcelain)" ]; then
     echo "No changes to the output on this push; exiting."
     exit 0
 fi
