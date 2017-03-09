@@ -1,6 +1,15 @@
+[![Build Status](https://travis-ci.org/dtreskunov/dhis2-wdc.svg?branch=master)](https://travis-ci.org/dtreskunov/dhis2-wdc)
+[![Language](https://img.shields.io/badge/language-clojure-brightgreen.svg)]()
+
 # DHIS2 Tableau Web Data Connector
 
 DHIS2 is the preferred health management information system in 47 countries and 23 organizations across four continents. Tableau is data visualization software that lets you see and understand data in minutes. Web Data Connector allows you to connect web data to Tableau.
+
+## Setup For Users
+
+Copy-and-paste the link below into Tableau Desktop's Web Data Connector dialog:
+
+**[DHIS2 Connector Link](https://dtreskunov.github.io/dhis2-wdc/)**
 
 ## Overview
 
@@ -8,14 +17,16 @@ Tableau is building a Web Data Connector (WDC) to DHIS2, a health management inf
 
 While DHIS2 is billed as being a comprehensive storage and analysis tool, even the DHIS2 developers support the creation of a Tableau connector to DHIS2 to address significant limitations with reporting and visualizing of data stored in DHIS2 implementations.
 The connector will allow users to:
+
 1. Connect to the application using OAuth2
 2. Turn user selected data elements into Tableau TDEs using the DHIS2 APIs
 3. Interact with the generated TDEs in Tableau Desktop
 4. Publish the data source to Tableau Online & Server
 5. In Tableau Online & Server successfully execute full refreshes on the data source extract.
+
 This will allow the users to have Tableau Online & Server pull “fresh data daily” from their account.
 
-## Setup
+## Setup For Developers
 
 Refer to Tableau Web Data Connector [documentation hub](http://tableau.github.io/webdataconnector/) for WDC specifics.
 
