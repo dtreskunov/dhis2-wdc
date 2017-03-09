@@ -11,3 +11,6 @@ pom.xml
 .lein-plugins/
 .repl
 .nrepl-port
+deploy_key
+deploy_key.pub
+.lein-failures
