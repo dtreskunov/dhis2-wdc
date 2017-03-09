@@ -10,6 +10,7 @@
 (s/def ::alias string?)
 (s/def ::description string?)
 (s/def ::incrementColumnId string?)
+(s/def ::joinOnly boolean?)
 (s/def ::dataType #{"bool" "date" "datetime" "float" "int" "string"})
 (s/def ::aggType #{"avg" "count" "count_dist" "median" "sum"})
 (s/def ::columnRole #{"dimension" "measure"})
@@ -32,7 +33,8 @@
                                     ::id]
                            :opt-un [::alias
                                     ::description
-                                    ::incrementColumnId]))
+                                    ::incrementColumnId
+                                    ::joinOnly]))
 (s/def ::tableInfos (s/coll-of ::tableInfo))
 (s/def ::standardConnection (s/keys :req-un [::alias
                                              ::tables
@@ -45,8 +47,8 @@
   (-get-name [this] "Connection name")
   (-get-table-infos [this] "Array of TableInfo objects")
   (-get-standard-connections [this] "Array of StandardConnection objects (describing predefined table joins) (optional)")
-  (-get-rows [this table-info] "core.async/channel containing retrieved table rows")
-  (-shutdown [this] "Called when the current WDC phase ends. Must return state which need to be persisted.")
+  (-get-rows! [this rows-chan table-info inc-val] "Asynchronously put arrays of rows into the provided channel")
+  (-shutdown [this] "Called when the current WDC phase ends. Must return state which needs to be persisted.")
   (-init [this phase state] "Called when a new WDC phase is entered. State saved at the end of previous phase is provided."))
 
 (defn get-phase []
@@ -80,11 +82,15 @@
   (println "get-data")
   (let [js-table-info (.-tableInfo js-table)
         table-info (s/assert ::tableInfo (js->clj js-table-info :keywordize-keys true))
-        rows-chan (-get-rows w table-info)]
-    (async/go-loop []
+        inc-val (.-incrementValue js-table)
+        rows-chan (async/chan)]
+    (-get-rows! w rows-chan table-info inc-val)
+    (async/go-loop [total 0]
       (when-let [rows (async/<! rows-chan)]
         (.appendRows js-table (clj->js rows))
-        (recur)))
+        (let [num (+ total (count rows))]
+          (.reportProgress js/tableau (str (:alias table-info) ": " num " rows fetched"))
+          (recur num))))
     (callback)))
 
 (defn register! [w]
