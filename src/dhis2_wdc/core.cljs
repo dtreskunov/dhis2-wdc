@@ -35,19 +35,20 @@
 
 (defn paginate [endpoint connection out xform]
   (async/go-loop [endpoint endpoint]
-      (when-let [response (async/<! (request endpoint connection))]
-        (async/>! out (xform response))
-        (let [page  (-> response :body :pager :page)
-              count (-> response :body :pager :pageCount)
-              has-params? (clojure.string/includes? endpoint "?")
-              has-page? (clojure.string/includes? endpoint "page=")
-              next (cond
-                     (>= page count) nil
-                     (not has-params?) (str endpoint "?page=" (inc page))
-                     (and has-params? has-page?) (clojure.string/replace endpoint (str "page=" page) (str "page=" (inc page)))
-                     (and has-params? (not has-page?)) (str endpoint "&page=" (inc page)))]
-          (when next
-            (recur next))))))
+    (when-let [response (async/<! (request endpoint connection))]
+      (async/>! out (xform response))
+      (let [page  (-> response :body :pager :page)
+            count (-> response :body :pager :pageCount)
+            has-params? (clojure.string/includes? endpoint "?")
+            has-page? (clojure.string/includes? endpoint "page=")
+            next (cond
+                   (>= page count) nil
+                   (not has-params?) (str endpoint "?page=" (inc page))
+                   (and has-params? has-page?) (clojure.string/replace endpoint (str "page=" page) (str "page=" (inc page)))
+                   (and has-params? (not has-page?)) (str endpoint "&page=" (inc page)))]
+        (if next
+          (recur next)
+          (async/close! out))))))
 
 (def tables
   {"ou"

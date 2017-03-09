@@ -89,13 +89,15 @@
         rows-chan (async/chan)]
     (-get-rows! w rows-chan table-info inc-val)
     (async/go-loop [total 0]
-      (when-let [rows (async/<! rows-chan)]
-        (append-rows (clj->js rows))
-        (let [num (+ total (count rows))]
-          (.reportProgress js/tableau (str (:alias table-info) ": " num " rows fetched"))
-          (recur num))))
-    (println "get-data DONE")
-    (callback)))
+      (if-let [rows (async/<! rows-chan)]
+        (do
+          (append-rows (clj->js rows))
+          (let [num (+ total (count rows))]
+            (.reportProgress js/tableau (str (:alias table-info) ": " num " rows fetched"))
+            (recur num)))
+        (do
+          (println "get-data DONE!")
+          (callback))))))
 
 (defn register! [w]
   "Registers the WDC"
