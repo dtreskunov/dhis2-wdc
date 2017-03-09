@@ -7,7 +7,7 @@
   :min-lein-version "2.7.1"
 
   :dependencies [[org.clojure/clojure "1.9.0-alpha14"]
-                 [org.clojure/clojurescript "1.9.229"]
+                 [org.clojure/clojurescript "1.9.473"]
                  [org.clojure/core.async "0.3.441" :exclusions [org.clojure/tools.reader]]
                  [reagent "0.6.0"]
                  [cljs-http "0.1.42"]]
@@ -38,6 +38,7 @@
                            :output-to "resources/public/js/compiled/dhis2_wdc.js"
                            :output-dir "resources/public/js/compiled/out"
                            :source-map-timestamp true
+                           :optimizations :none
                            ;; To console.log CLJS data-structures make sure you enable devtools in Chrome
                            ;; https://github.com/binaryage/cljs-devtools
                            :preloads [devtools.preload]}}
@@ -49,6 +50,8 @@
                 :compiler {:output-to "resources/public/js/compiled/dhis2_wdc.js"
                            :main dhis2-wdc.core
                            :optimizations :advanced
+                           ;:infer-externs true
+                           :externs ["src/externs.js"]
                            :pretty-print false}}]}
 
   :figwheel {;; :http-server-root "public" ;; default and assumes "resources"

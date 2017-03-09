@@ -3,6 +3,8 @@
   (:require [cljs.spec :as s]
             [cljs.core.async :as async]))
 
+; (set! *warn-on-infer* true)
+
 (s/check-asserts true)
 
 ;; Functions and objects of the WDC API v2 (http://tableau.github.io/webdataconnector/docs/api_ref)
@@ -80,17 +82,19 @@
 
 (defn- get-data [w js-table callback]
   (println "get-data")
-  (let [js-table-info (.-tableInfo js-table)
+  (let [js-table-info (aget js-table "tableInfo")
+        inc-val (aget js-table "incrementValue")
+        append-rows (aget js-table "appendRows")
         table-info (s/assert ::tableInfo (js->clj js-table-info :keywordize-keys true))
-        inc-val (.-incrementValue js-table)
         rows-chan (async/chan)]
     (-get-rows! w rows-chan table-info inc-val)
     (async/go-loop [total 0]
       (when-let [rows (async/<! rows-chan)]
-        (.appendRows js-table (clj->js rows))
+        (append-rows (clj->js rows))
         (let [num (+ total (count rows))]
           (.reportProgress js/tableau (str (:alias table-info) ": " num " rows fetched"))
           (recur num))))
+    (println "get-data DONE")
     (callback)))
 
 (defn register! [w]

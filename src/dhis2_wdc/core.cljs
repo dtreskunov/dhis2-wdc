@@ -5,6 +5,8 @@
             [cljs-http.client :as http]
             [cljs.core.async :as async]))
 
+; (set! *warn-on-infer* true)
+
 (enable-console-print!)
 (declare render)
 
@@ -30,6 +32,22 @@
       (wrap-auth authorization)
       (wrap-accept)
       (apply http/get)))
+
+(defn paginate [endpoint connection out xform]
+  (async/go-loop [endpoint endpoint]
+      (when-let [response (async/<! (request endpoint connection))]
+        (async/>! out (xform response))
+        (let [page  (-> response :body :pager :page)
+              count (-> response :body :pager :pageCount)
+              has-params? (clojure.string/includes? endpoint "?")
+              has-page? (clojure.string/includes? endpoint "page=")
+              next (cond
+                     (>= page count) nil
+                     (not has-params?) (str endpoint "?page=" (inc page))
+                     (and has-params? has-page?) (clojure.string/replace endpoint (str "page=" page) (str "page=" (inc page)))
+                     (and has-params? (not has-page?)) (str endpoint "&page=" (inc page)))]
+          (when next
+            (recur next))))))
 
 (def tables
   {"ou"
@@ -64,22 +82,6 @@
                      :displayName displayName
                      :lat lat
                      :lon lon})))))}})
-
-(defn paginate [endpoint connection out xform]
-  (async/go-loop [endpoint endpoint]
-      (when-let [response (async/<! (request endpoint connection))]
-        (async/>! out (xform response))
-        (let [page  (-> response :body :pager :page)
-              count (-> response :body :pager :pageCount)
-              has-params? (clojure.string/includes? endpoint "?")
-              has-page? (clojure.string/includes? endpoint "page=")
-              next (cond
-                     (>= page count) nil
-                     (not has-params?) (str endpoint "?page=" (inc page))
-                     (and has-params? has-page?) (clojure.string/replace endpoint (str "page=" page) (str "page=" (inc page)))
-                     (and has-params? (not has-page?)) (str endpoint "&page=" (inc page)))]
-          (when next
-            (recur next))))))
 
 (deftype DHIS2WDC [connection]
   wdc/IWebDataConnector
