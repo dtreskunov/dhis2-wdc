@@ -76,7 +76,7 @@
            :body
            :organisationUnits
            (map (fn [{:keys [id level featureType displayName coordinates]}]
-                  (let [[lat lon] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
+                  (let [[lon lat] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
                     {:id id
                      :level level
                      :featureType featureType
