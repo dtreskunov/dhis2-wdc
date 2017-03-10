@@ -73,18 +73,21 @@
 
     :table-info
     {:alias   "Organisation Units"
-     :columns [{:id       "id"
-                :dataType "string"}
-               {:id       "level"
-                :dataType "int"}
-               {:id       "displayName"
-                :dataType "string"}
-               {:id       "featureType"
-                :dataType "string"}
-               {:id       "lat"
-                :dataType "float"}
-               {:id       "lon"
-                :dataType "float"}]}
+     :columns [{:id         "id"
+                :dataType   "string"}
+               {:id         "level"
+                :dataType   "int"
+                :columnType "discrete"}
+               {:id         "displayName"
+                :dataType   "string"}
+               {:id         "featureType"
+                :dataType   "string"}
+               {:id         "lat"
+                :dataType   "float"
+                :columnRole "dimension"}
+               {:id         "lon"
+                :dataType   "float"
+                :columnRole "dimension"}]}
 
     :response->rows
     (fn [response]
@@ -212,12 +215,19 @@
 
 (defn root-component []
   (when (:show-ui? @app-state)
-    [:div.container {:style {"marginTop" "2em"}}
+    [:div.container
      [:div.jumbotron
       [:h2 "DHIS2 Tableau Connector"]
       (if (:called-by-tableau? @app-state)
         [ui-component]
-        [learn-more-component])]]))
+        [learn-more-component])
+      [:nav.navbar.navbar-default.navbar-fixed-bottom
+       [:div.container.text-center
+        "Written in "
+        [:a.label.label-success {:target "_blank" :href "https://clojurescript.org"} "ClojureScript"]
+        " with "
+        [:span.label.label-danger "love"]
+        " by Denis Treskunov"]]]]))
 
 (r/render-component
  [root-component]
