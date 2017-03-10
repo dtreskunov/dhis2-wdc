@@ -43,15 +43,19 @@
                                              ::joins]))
 (s/def ::standardConnections (s/coll-of ::standardConnection))
 (s/def ::phase #{"auth" "interactive" "gatherData"})
+(s/def ::authType #{"none" "basic" "custom"})
+
+(s/def ::state (s/keys :opt-un [::connection-data ::username ::password]))
 
 (defprotocol IWebDataConnector
   "Web Data Connector protocol"
+  (-get-auth-type [this] "AuthType")
   (-get-name [this] "Connection name")
   (-get-table-infos [this] "Array of TableInfo objects")
   (-get-standard-connections [this] "Array of StandardConnection objects (describing predefined table joins) (optional)")
   (-get-rows! [this rows-chan table-info inc-val] "Asynchronously put arrays of rows into the provided channel")
-  (-shutdown [this] "Called when the current WDC phase ends. Must return state which needs to be persisted.")
-  (-init [this phase state] "Called when a new WDC phase is entered. State saved at the end of previous phase is provided."))
+  (-shutdown [this] "Called when the current WDC phase ends. Must return ::state which needs to be persisted.")
+  (-init [this phase state] "Called when a new WDC phase is entered. ::state saved at the end of previous phase is provided."))
 
 (defn get-phase []
   "Returns the current WDC phase"
@@ -60,19 +64,28 @@
 
 (defn- init [w callback]
   (let [phase (get-phase)
-        s (aget js/tableau "connectionData")
-        state (if-not (empty? s) (js->clj (.parse js/JSON s) :keywordize-keys true))]
+        connection-data-str (aget js/tableau "connectionData")
+        username (aget js/tableau "username")
+        password (aget js/tableau "password")
+        state {:username username
+               :password password
+               :connection-data (when-not (empty? connection-data-str)
+                                  (js->clj (.parse js/JSON connection-data-str) :keywordize-keys true))}
+        auth-type (s/assert ::authType (-get-auth-type w))]
     (println (str "Entering phase: " phase))
-    (-init w phase state))
+    (-init w phase state)
+    (aset js/tableau "authType" auth-type))
   (callback))
 
 (defn- shutdown [w callback]
   (println (str "Exiting phase: " (get-phase)))
-  (when-let [state (-shutdown w)]
-    (->> state
-         clj->js
-         (.stringify js/JSON)
-         (aset js/tableau "connectionData")))
+  (let [{:keys [username password connection-data]} (s/assert ::state (-shutdown w))
+        connection-data-str (->> connection-data
+                                 clj->js
+                                 (.stringify js/JSON))]
+    (aset js/tableau "connectionData" connection-data-str)
+    (aset js/tableau "username" username)
+    (aset js/tableau "password" password))
   (callback))
 
 (defn- get-schema [w callback]
@@ -107,10 +120,10 @@
           (aset "shutdown" (partial shutdown w))
           (aset "getSchema" (partial get-schema w))
           (aset "getData" (partial get-data w)))]
-    (.registerConnector js/tableau connector))
-  (aset js/tableau "connectionName" (-get-name w)))
+    (.registerConnector js/tableau connector)))
 
 (defn go! [w]
   "Transitions from WDC 'interactive' phase to 'gather data' phase"
   (shutdown w #(println "shutdown callback"))
+  (aset js/tableau "connectionName" (-get-name w))
   (.submit js/tableau))
