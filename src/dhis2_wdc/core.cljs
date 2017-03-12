@@ -1,9 +1,10 @@
 (ns dhis2-wdc.core
-  (:require-macros [cljs.core.async.macros :as async])
-  (:require [dhis2-wdc.wdc :as wdc]
-            [reagent.core :as r]
-            [cljs-http.client :as http]
-            [cljs.core.async :as async]))
+  (:require [cljs-http.client :as http]
+            [cljs.core.async :as async]
+            [dhis2-wdc.wdc :as wdc]
+            [reagent.core :as r])
+  (:require-macros
+   [cljs.core.async.macros :as async]))
 
 ; (set! *warn-on-infer* true)
 
@@ -49,19 +50,21 @@
          (wrap-accept)
          (apply http/get))))
 
+(defn set-query-param [url k v]
+  (let [re (re-pattern (str "([?&])" k "=.*?(&|$)"))
+        sep (if (clojure.string/includes? url "?") "&" "?")
+        kv (when v (str k "=" v))]
+    (if (re-find re url)
+      (clojure.string/replace url re (str "$1" kv "$2"))
+      (str url sep kv))))
+
 (defn paginate [endpoint wdc-state out xform]
   (async/go-loop [endpoint endpoint]
     (when-let [response (async/<! (request endpoint wdc-state))]
       (async/>! out (xform response))
       (let [page  (-> response :body :pager :page)
             count (-> response :body :pager :pageCount)
-            has-params? (clojure.string/includes? endpoint "?")
-            has-page? (clojure.string/includes? endpoint "page=")
-            next (cond
-                   (>= page count) nil
-                   (not has-params?) (str endpoint "?page=" (inc page))
-                   (and has-params? has-page?) (clojure.string/replace endpoint (str "page=" page) (str "page=" (inc page)))
-                   (and has-params? (not has-page?)) (str endpoint "&page=" (inc page)))]
+            next (when (< page count) (set-query-param endpoint "page" (inc page)))]
         (if next
           (recur next)
           (async/close! out))))))
@@ -105,7 +108,7 @@
 
 (defonce wdc-state
   (r/atom
-   {:connection-data {:cors-proxy "cors-anywhere.herokuapp.com"}
+   {:connection-data {:cors-proxy "dtreskunov-cors-anywhere.herokuapp.com"}
     :username nil
     :password nil}))
 
@@ -141,18 +144,20 @@
 (defn has-blanks? [coll & ks]
   (some #(clojure.string/blank? (if (vector? %) (get-in coll %) (coll %))) ks))
 
-(defn bind [state ks]
+(defn bind [state & {:keys [js-> ->js] :or {js-> identity ->js identity} :as attrs}]
   (letfn [(get-value [event]
             (-> event
                 (aget "target")
-                (aget "value")))
+                (aget "value")
+                js->))
           (on-change [event]
-            (swap! state assoc-in ks (get-value event)))]
-    {:value (get-in @state ks)
-     :on-change on-change}))
+            (reset! state (get-value event)))]
+    (assoc attrs
+           :value (->js @state)
+           :on-change on-change)))
 
 (defn sign-in! []
-  (let [req (request "/api/26/me" @wdc-state)]
+  (let [req (request "/api/26/me?fields=id,displayName" @wdc-state)]
     (async/go
       (when-let [{:keys [status body]} (async/<! req)]
         (when (= 200 status)
@@ -166,20 +171,17 @@
    [:div.panel-body
     [:form.form-horizontal
      [:div.form-group
-      [:label.col-sm-2.control-label "Server URL"]
+      [:label.col-sm-2.control-label "Server"]
       [:div.col-sm-10
-       [:input.form-control (merge {:type "url":placeholder "Server URL"}
-                                   (bind wdc-state [:connection-data :baseurl]))]]]
+       [:input.form-control (bind (r/cursor wdc-state [:connection-data :baseurl]) :type "url" :placeholder "Server URL")]]]
      [:div.form-group
       [:label.col-sm-2.control-label "Username"]
       [:div.col-sm-10
-       [:input.form-control (merge {:type "text" :placeholder "Username"}
-                                   (bind wdc-state [:username]))]]]
+       [:input.form-control (bind (r/cursor wdc-state [:username]) :type "text" :placeholder "Username")]]]
      [:div.form-group
       [:label.col-sm-2.control-label "Password"]
       [:div.col-sm-10
-       [:input.form-control (merge {:type "password" :placeholder "Password"}
-                                   (bind wdc-state [:password]))]]]
+       [:input.form-control (bind (r/cursor wdc-state [:password]) :type "password" :placeholder "Password")]]]
      [:div.form-group
       [:a.col-sm-2.control-label {:role "button"
                                   :on-click #(swap! wdc-state deep-merge {:connection-data {:baseurl "https://play.dhis2.org/dev"}
@@ -192,16 +194,112 @@
                                  :disabled (has-blanks? @wdc-state [:connection-data :baseurl] :username :password)}
         "Sign In"]]]]]])
 
+(defn indexed [f coll]
+  (into {} (map (fn [x] [(f x) x]) coll)))
+
+; not uesd - the rawData API seems to ignore startDate/endDate
+(defn select-date-component [selection-a {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
+  (let [invalid? (r/atom nil)
+        zero-pad #(if (< % 10) (str "0" %) (str %))
+        format (fn [date] (str (.getUTCFullYear date) "-" (zero-pad (inc (.getUTCMonth date))) "-" (zero-pad (.getUTCDate date))))
+        on-change (fn [e]
+                    (let [text (-> e (aget "target") (aget "value"))
+                          date (js/Date. text)]
+                      (reset! invalid? (validate date))
+                      (when-not @invalid?
+                        (reset! selection-a date))))]
+    (fn []
+      [:form-group {:class (if @invalid? "has-error" "has-success")}
+       [:input.form-control {:type "date" :value (if @selection-a (format @selection-a) "") :on-change on-change}]
+       [:span.help-block.small (when @selection-a (format @selection-a))]])))
+
+(defn select-multi-component [selection-a get-items-a & {:keys [filter? display-by index-by size]
+                                                   :or {filter? false display-by :displayName index-by :id size 5}}]
+  "Shows a multi-line multiple select element. Optionally adds a filter text field.
+
+   selection-a is an atom wrapping a map of id to item
+   load! is a 1-2 arity fn which takes an atom and a search string and updates the atom with available items
+   :filter? is an optional keyword arg that makes the filter text field show up
+   :display-by is an optional keyword arg
+   :index-by is an optional keyword arg"
+  (let [filter-a (r/atom "")
+        items-aa (r/track #(get-items-a @filter-a))
+        items-index-a (r/track #(indexed index-by @@items-aa))
+        select! (fn [ids] (reset! selection-a (select-keys @items-index-a ids)))
+        on-option-click (fn [e]
+                          (let [js-options (-> e (aget "target") (aget "parentElement") (aget "options"))
+                                options (for [i (range (aget js-options "length")) :let [option (aget js-options i)]] option)
+                                selected (filter (fn [option] (aget option "selected")) options)
+                                ids (map (fn [option] (aget option "value")) selected)]
+                            (select! ids)))]
+    (fn []
+      (let [select-markup
+            [:select.form-control {:default-value (or (keys @selection-a) []) :multiple true :size size}
+             (for [item @@items-aa]
+               ^{:key item} [:option {:value (index-by item) :on-click on-option-click} (display-by item)])]]
+        (if filter?
+          [:div.container
+           [:div.row
+            [:input.form-control (bind filter-a :type "text" :placeholder "Filter")]]
+           [:div.row
+            select-markup]]
+          select-markup)))))
+
+(defn get-dimensions [s]
+  (println (str "get-dimensions " s))
+  (let [a (r/atom nil)
+        query-param (when-not (clojure.string/blank? s) (str "displayName:ilike:" s))
+        endpoint (set-query-param "/api/26/dataElements?fields=id,displayName,valueType,aggregationType" "filter" query-param)]
+    (async/go
+      (when-let [{:keys [body]} (async/<! (request endpoint @wdc-state))]
+        (reset! a (:dataElements body))))
+    a))
+
+(defn dimensions-select-component [selection-a]
+  (let [left-a (r/atom nil)
+        right-a (r/atom nil)
+        add! (fn [] (swap! selection-a merge @left-a))
+        remove! (fn [] (reset! selection-a (apply dissoc @selection-a (keys @right-a))))]
+    (fn []
+      [:div
+       [:div.form-group
+        [:label.col-sm-3.control-label "Available dimensions"]
+        [:div.col-sm-9
+         [select-multi-component left-a
+          get-dimensions
+          :filter? true
+          :size 25]]]
+       [:div.form-group
+        [:div.col-sm-offset-3.col-sm-9
+         [:div.btn-group
+          [:button.btn.btn-default {:type "button" :on-click add!}
+           [:span.glyphicon.glyphicon-arrow-down]]
+          [:button.btn.btn-default {:type "button" :on-click remove!}
+           [:span.glyphicon.glyphicon-arrow-up]]]]]
+       [:div.form-group
+        [:label.col-sm-3.control-label "Selected dimensions"]
+        [:div.col-sm-9
+         [select-multi-component right-a
+          #(r/track sort-by :displayName (vals @selection-a))
+          :size 5]]]])))
+
+(defn data-missing? []
+  (empty? (get-in @wdc-state [:connection-data :dimensions])))
+
 (defn choose-data-component []
   [:div.panel.panel-primary
-   [:div.panel-heading (str "Welcome, " (get-in @app-state [:user :name]) "!")]
+   [:div.panel-heading (str "Welcome, " (get-in @app-state [:user :displayName]) "!")]
    [:div.panel-body
-    [:input {:type "button" :value "Go!" :on-click #(wdc/go! wdc)}]]])
+    [:form.form-horizontal
+     [dimensions-select-component (r/cursor wdc-state [:connection-data :dimensions])]
+     [:div.form-group
+      [:div.col-sm-offset-3.col-sm-9
+       [:button.btn.btn-default {:type "button" :disabled (data-missing?) :on-click #(wdc/go! wdc)} "Go!"]]]]]])
 
 (defn ui-component []
-  (if-not (:user @app-state)
-    [sign-in-component]
-    [choose-data-component]))
+  (if (:user @app-state)
+    [choose-data-component]
+    [sign-in-component]))
 
 (defn learn-more-component []
   [:div
@@ -220,14 +318,7 @@
       [:h2 "DHIS2 Tableau Connector"]
       (if (:called-by-tableau? @app-state)
         [ui-component]
-        [learn-more-component])
-      [:nav.navbar.navbar-default.navbar-fixed-bottom
-       [:div.container.text-center
-        "Written in "
-        [:a.label.label-success {:target "_blank" :href "https://clojurescript.org"} "ClojureScript"]
-        " with "
-        [:span.label.label-danger "love"]
-        " by Denis Treskunov"]]]]))
+        [learn-more-component])]]))
 
 (r/render-component
  [root-component]
