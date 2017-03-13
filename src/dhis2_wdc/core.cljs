@@ -197,7 +197,7 @@
 (defn indexed [f coll]
   (into {} (map (fn [x] [(f x) x]) coll)))
 
-; not uesd - the rawData API seems to ignore startDate/endDate
+; not used - the rawData API seems to ignore startDate/endDate
 (defn select-date-component [selection-a {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
   (let [invalid? (r/atom nil)
         zero-pad #(if (< % 10) (str "0" %) (str %))
@@ -213,62 +213,76 @@
        [:input.form-control {:type "date" :value (if @selection-a (format @selection-a) "") :on-change on-change}]
        [:span.help-block.small (when @selection-a (format @selection-a))]])))
 
-(defn select-multi-component [selection-a get-items-a & {:keys [filter? display-by index-by size]
-                                                   :or {filter? false display-by :displayName index-by :id size 5}}]
-  "Shows a multi-line multiple select element. Optionally adds a filter text field.
+(defn select-component
+  "A <select> (combo) component.
+  
+  The first argument is an atom holding the selected item or index of selected items (map id -> item).
+  The second argument is an atom holding items available to be selected.
 
-   selection-a is an atom wrapping a map of id to item
-   load! is a 1-2 arity fn which takes an atom and a search string and updates the atom with available items
-   :filter? is an optional keyword arg that makes the filter text field show up
-   :display-by is an optional keyword arg
-   :index-by is an optional keyword arg"
-  (let [filter-a (r/atom "")
-        items-aa (r/track #(get-items-a @filter-a))
-        items-index-a (r/track #(indexed index-by @@items-aa))
-        select! (fn [ids] (reset! selection-a (select-keys @items-index-a ids)))
-        on-option-click (fn [e]
-                          (let [js-options (-> e (aget "target") (aget "parentElement") (aget "options"))
-                                options (for [i (range (aget js-options "length")) :let [option (aget js-options i)]] option)
-                                selected (filter (fn [option] (aget option "selected")) options)
-                                ids (map (fn [option] (aget option "value")) selected)]
-                            (select! ids)))]
+  Optional keyword arguments:
+  :display-by function that takes an item and returns a string to be displayed
+  :index-by function that takes an item and returns a string id
+  :size how many lines to show
+  :multiple? whether to allow multiple selection"
+  [selection-a items-a {:keys [display-by index-by size multiple?]
+                        :or {display-by :displayName index-by :id size 5 multiple? true}}]
+  (let [items-index-a (r/track #(indexed index-by @items-a))
+        on-select-change (fn [e]
+                           (let [selection
+                                 (if multiple?
+                                   (let [js-options (-> e (aget "target") (aget "options"))
+                                         options (for [i (range (aget js-options "length")) :let [option (aget js-options i)]] option)
+                                         selected (filter (fn [option] (aget option "selected")) options)
+                                         ids (map (fn [option] (aget option "value")) selected)
+                                         items (select-keys @items-index-a ids)]
+                                     items)
+                                   (let [id (-> e (aget "target") (aget "value"))
+                                         item (get @items-index-a id)]
+                                     item))]
+                             (reset! selection-a selection)))
+        default-value (if multiple?
+                        (or (keys @selection-a) [])
+                        (or (index-by @selection-a) ""))]
     (fn []
-      (let [select-markup
-            [:select.form-control {:default-value (or (keys @selection-a) []) :multiple true :size size}
-             (for [item @@items-aa]
-               ^{:key item} [:option {:value (index-by item) :on-click on-option-click} (display-by item)])]]
-        (if filter?
-          [:div.container
-           [:div.row
-            [:input.form-control (bind filter-a :type "text" :placeholder "Filter")]]
-           [:div.row
-            select-markup]]
-          select-markup)))))
+      [:select.form-control {:default-value default-value :on-change on-select-change :size size :multiple multiple?}
+       (for [item @items-a]
+         ^{:key item} [:option {:value (index-by item)} (display-by item)])])))
 
-(defn get-dimensions [s]
-  (println (str "get-dimensions " s))
-  (let [a (r/atom nil)
-        query-param (when-not (clojure.string/blank? s) (str "displayName:ilike:" s))
+(defn select-filtered-component
+  "A component combining a filter string input box and a <select> combo
+
+  The first argument is an atom holding the selected item or index of selected items (see docs for select-component).
+  The second argument is a function that takes the filter string and an atom, and resets the atom to filtered items.
+  The third argument is passed through to select-component."
+  [selection-a get-items! opts]
+  (let [filter-a (r/atom "")
+        items-a (r/atom nil)]
+    (fn []
+      (get-items! @filter-a items-a)
+      [:div.container
+       [:div.row
+        [:input.form-control (bind filter-a :type "text" :placeholder "Filter")]]
+       [:div.row
+        [select-component selection-a items-a opts]]])))
+
+(defn get-dimensions! [s a]
+  (let [query-param (when-not (clojure.string/blank? s) (str "displayName:ilike:" s))
         endpoint (set-query-param "/api/26/dataElements?fields=id,displayName,valueType,aggregationType" "filter" query-param)]
     (async/go
       (when-let [{:keys [body]} (async/<! (request endpoint @wdc-state))]
-        (reset! a (:dataElements body))))
-    a))
+        (reset! a (:dataElements body))))))
 
 (defn dimensions-select-component [selection-a]
-  (let [left-a (r/atom nil)
-        right-a (r/atom nil)
-        add! (fn [] (swap! selection-a merge @left-a))
-        remove! (fn [] (reset! selection-a (apply dissoc @selection-a (keys @right-a))))]
+  (let [top-a (r/atom nil)
+        bottom-a (r/atom nil)
+        add! (fn [] (swap! selection-a merge @top-a))
+        remove! (fn [] (reset! selection-a (apply dissoc @selection-a (keys @bottom-a))))]
     (fn []
       [:div
        [:div.form-group
         [:label.col-sm-3.control-label "Available dimensions"]
         [:div.col-sm-9
-         [select-multi-component left-a
-          get-dimensions
-          :filter? true
-          :size 25]]]
+         [select-filtered-component top-a get-dimensions! {:filter? true :size 25}]]]
        [:div.form-group
         [:div.col-sm-offset-3.col-sm-9
          [:div.btn-group
@@ -279,9 +293,7 @@
        [:div.form-group
         [:label.col-sm-3.control-label "Selected dimensions"]
         [:div.col-sm-9
-         [select-multi-component right-a
-          #(r/track sort-by :displayName (vals @selection-a))
-          :size 5]]]])))
+         [select-component bottom-a (r/track #(sort-by :displayName (vals @selection-a))) {:size 5}]]]])))
 
 (defn data-missing? []
   (empty? (get-in @wdc-state [:connection-data :dimensions])))
