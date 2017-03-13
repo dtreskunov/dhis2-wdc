@@ -8,7 +8,7 @@
 (s/check-asserts true)
 
 ;; Functions and objects of the WDC API v2 (http://tableau.github.io/webdataconnector/docs/api_ref)
-(s/def ::id string?)
+(s/def ::id (s/and string? #(re-matches #"\w+" %)))
 (s/def ::alias string?)
 (s/def ::description string?)
 (s/def ::incrementColumnId string?)

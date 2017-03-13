@@ -41,76 +41,158 @@
 (defn wrap-accept [[url opts]]
   [url (merge-with merge opts {:headers {"Accept" "application/json"}})])
 
-(defn request [endpoint {:keys [connection-data username password]}]
-  (let [{:keys [baseurl cors-proxy]} connection-data]
-    (->> [endpoint nil]
+(defonce wdc-state
+  (r/atom
+   {:connection-data {:cors-proxy "dtreskunov-cors-anywhere.herokuapp.com"}
+    :username nil
+    :password nil}))
+
+(defn request [endpoint & [req]]
+  (let [username (:username @wdc-state)
+        password (:password @wdc-state)
+        {:keys [baseurl cors-proxy]} (:connection-data @wdc-state)]
+    (->> [endpoint req]
          (wrap-baseurl baseurl)
          (wrap-cors cors-proxy)
          (wrap-basic-auth username password)
          (wrap-accept)
          (apply http/get))))
 
-(defn set-query-param [url k v]
-  (let [re (re-pattern (str "([?&])" k "=.*?(&|$)"))
-        sep (if (clojure.string/includes? url "?") "&" "?")
-        kv (when v (str k "=" v))]
-    (if (re-find re url)
-      (clojure.string/replace url re (str "$1" kv "$2"))
-      (str url sep kv))))
-
-(defn paginate [endpoint wdc-state out xform]
-  (async/go-loop [endpoint endpoint]
-    (when-let [response (async/<! (request endpoint wdc-state))]
+(defn paginate [out xform endpoint & [req]]
+  (async/go-loop [req req]
+    (when-let [response (async/<! (request endpoint req))]
       (async/>! out (xform response))
       (let [page  (-> response :body :pager :page)
             count (-> response :body :pager :pageCount)
-            next (when (< page count) (set-query-param endpoint "page" (inc page)))]
+            next (when (< page count) (assoc-in req [:query-params :page] (inc page)))]
         (if next
           (recur next)
           (async/close! out))))))
 
-(def tables
-  {"ou"
-   {:endpoint
-    "/api/26/organisationUnits?fields=id,level,featureType,displayName,coordinates"
+(defn indexed [f coll]
+  (into {} (map (fn [x] [(f x) x]) coll)))
 
-    :table-info
-    {:alias   "Organisation Units"
-     :columns [{:id         "id"
-                :dataType   "string"}
-               {:id         "level"
-                :dataType   "int"
-                :columnType "discrete"}
-               {:id         "displayName"
-                :dataType   "string"}
-               {:id         "featureType"
-                :dataType   "string"}
-               {:id         "lat"
-                :dataType   "float"
-                :columnRole "dimension"}
-               {:id         "lon"
-                :dataType   "float"
-                :columnRole "dimension"}]}
+(def ou-table
+  {:endpoint "/api/26/organisationUnits"
+   :req {:query-params {:fields "id,level,featureType,displayName,coordinates"}}
 
-    :response->rows
-    (fn [response]
-      (->> response
-           :body
-           :organisationUnits
-           (map (fn [{:keys [id level featureType displayName coordinates]}]
-                  (let [[lon lat] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
-                    {:id id
-                     :level level
-                     :featureType featureType
-                     :displayName displayName
-                     :lat lat
-                     :lon lon})))))}})
+   :table-info
+   {:id "ou"
+    :alias   "Organisation Units"
+    :columns [{:id         "id"
+               :dataType   "string"}
+              {:id         "level"
+               :dataType   "int"
+               :columnType "discrete"}
+              {:id         "displayName"
+               :dataType   "string"}
+              {:id         "featureType"
+               :dataType   "string"}
+              {:id         "lat"
+               :dataType   "float"
+               :columnRole "dimension"}
+              {:id         "lon"
+               :dataType   "float"
+               :columnRole "dimension"}]}
 
-(defonce wdc-state
-  (r/atom
-   {:connection-data {:cors-proxy "dtreskunov-cors-anywhere.herokuapp.com"}
-    :username nil
-    :password nil}))
+   :response->rows
+   (fn [response]
+     (->> response
+          :body
+          :organisationUnits
+          (map (fn [{:keys [id level featureType displayName coordinates]}]
+                 (let [[lon lat] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
+                   {:id id
+                    :level level
+                    :featureType featureType
+                    :displayName displayName
+                    :lat lat
+                    :lon lon})))))})
+
+(defn find-table-by-id [tables id]
+  (first (filter #(= id (-> % :table-info :id)) tables)))
+
+(defn indices [pred coll]
+  (keep-indexed #(when (pred %2) %1) coll))
+
+(defn index-of "First index of item mapping k to v" [coll k v]
+  (first (indices #(= v (k %)) coll)))
+
+(defn get-tables [connection-data]
+  (into
+   [ou-table]
+   (for [{:keys [id aggregationType displayName valueType]} (vals (:dimensions connection-data))
+         :let [agg-type (get {"AVERAGE" "avg"
+                              "COUNT" "count"
+                              "SUM" "sum"}
+                             aggregationType)
+               data-type (get {"BOOLEAN" "bool"
+                               "DATE" "date"
+                               "DATETIME" "datetime"
+                               "INTEGER" "int"
+                               "INTEGER_NEGATIVE" "int"
+                               "INTEGER_POSITIVE" "int"
+                               "INTEGER_ZERO_OR_POSITIVE" "int"
+                               "NUMBER" "float"
+                               "PERCENTAGE" "float"}
+                              valueType "string")]]
+     {:endpoint "/api/26/analytics/rawData.json"
+      :req {:query-params {:dimension ["co" "ou:LEVEL-1" "pe:LAST_YEAR" (str "dx:" id)]}}
+       
+      :table-info
+      {:id id
+       :alias displayName
+       :columns [{:id "co"
+                  :dataType "string"
+                  :alias "Category option combo ID"}
+                 {:id "co_val"
+                  :dataType "string"
+                  :alias "Category option combo"}
+                 {:id "ou"
+                  :dataType "string"
+                  :alias "Organisation unit ID"}
+                 {:id "pe"
+                  :dataType "string"
+                  :alias "Period"}
+                 {:id "value"
+                  :dataType data-type
+                  :alias (str "Value of " displayName)
+                  :aggType agg-type}]}
+      :response->rows
+      (fn [response]
+        (let [headers (-> response :body :headers)
+              meta-items (-> response :body :metaData :items)
+              co-index (index-of headers :name "co")
+              ou-index (index-of headers :name "ou")
+              pe-index (index-of headers :name "pe")
+              value-index (index-of headers :name "value")]
+          (->> response
+               :body
+               :rows
+               (map (fn [row]
+                      {:co (nth row co-index)
+                       :co_val (:name (get meta-items (keyword (nth row co-index))))
+                       :ou (nth row ou-index)
+                       :pe (nth row pe-index)
+                       :value (nth row value-index)})))))})))
+
+(defn get-standard-connections "Join each dimension to the ou table"
+  [connection-data]
+  (let [tables (get-tables connection-data)
+        ou-table (find-table-by-id tables "ou")
+        ou-alias (-> ou-table :table-info :alias)]
+    (when ou-table
+      (mapcat
+       (fn [{:keys [table-info]}]
+         (let [{:keys [id alias]} table-info]
+           (when-not (= "ou" id)
+             [{:alias (str alias ", joined to " ou-alias)
+               :tables [{:id id :alias alias}
+                        {:id "ou" :alias ou-alias}]
+               :joins [{:left {:tableAlias alias :columnId "ou"}
+                        :right {:tableAlias ou-alias :columnId "id"}
+                        :joinType :left}]}])))
+       tables))))
 
 (defonce app-state
   (r/atom
@@ -124,12 +206,14 @@
   (-get-name [this]
     (str "DHIS2 Connection to " (get-in @wdc-state [:connection-data :baseurl])))
   (-get-table-infos [this]
-    (map (fn [[id table]] (assoc (:table-info table) :id id)) tables))
+    (map :table-info (get-tables (:connection-data @wdc-state))))
   (-get-standard-connections [this]
-    [])
+    (get-standard-connections (:connection-data @wdc-state)))
   (-get-rows! [this rows-chan table-info inc-val]
-    (when-let [{:keys [endpoint response->rows]} (get tables (:id table-info))]
-      (paginate endpoint @wdc-state rows-chan response->rows)))
+    (let [id (:id table-info)
+          tables (get-tables (:connection-data @wdc-state))]
+      (when-let [{:keys [endpoint req response->rows]} (find-table-by-id tables id)]
+        (paginate rows-chan response->rows endpoint req))))
   (-shutdown [this]
     @wdc-state)
   (-init [this phase preserved-state]
@@ -157,7 +241,7 @@
            :on-change on-change)))
 
 (defn sign-in! []
-  (let [req (request "/api/26/me?fields=id,displayName" @wdc-state)]
+  (let [req (request "/api/26/me" {:query-params {:fields ["id" "displayName"]}})]
     (async/go
       (when-let [{:keys [status body]} (async/<! req)]
         (when (= 200 status)
@@ -193,9 +277,6 @@
                                  :type "button"
                                  :disabled (has-blanks? @wdc-state [:connection-data :baseurl] :username :password)}
         "Sign In"]]]]]])
-
-(defn indexed [f coll]
-  (into {} (map (fn [x] [(f x) x]) coll)))
 
 ; not used - the rawData API seems to ignore startDate/endDate
 (defn select-date-component [selection-a {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
@@ -266,10 +347,11 @@
         [select-component selection-a items-a opts]]])))
 
 (defn get-dimensions! [s a]
-  (let [query-param (when-not (clojure.string/blank? s) (str "displayName:ilike:" s))
-        endpoint (set-query-param "/api/26/dataElements?fields=id,displayName,valueType,aggregationType" "filter" query-param)]
+  (let [req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"]}
+                                 (when-not (clojure.string/blank? s)
+                                   {:filter (str "displayName:ilike:" s)}))}]
     (async/go
-      (when-let [{:keys [body]} (async/<! (request endpoint @wdc-state))]
+      (when-let [{:keys [body]} (async/<! (request "/api/26/dataElements" req))]
         (reset! a (:dataElements body))))))
 
 (defn dimensions-select-component [selection-a]
