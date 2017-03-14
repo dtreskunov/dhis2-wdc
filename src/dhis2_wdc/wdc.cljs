@@ -11,7 +11,7 @@
 (s/def ::id (s/and string? #(re-matches #"\w+" %)))
 (s/def ::alias string?)
 (s/def ::description string?)
-(s/def ::incrementColumnId ::id)
+(s/def ::incrementColumnId (s/or :nil nil? :empty #{""} :some ::id))
 (s/def ::joinOnly boolean?)
 (s/def ::filterable boolean?)
 (s/def ::dataType #{"bool" "date" "datetime" "float" "int" "string"})
