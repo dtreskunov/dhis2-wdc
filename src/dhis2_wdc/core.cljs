@@ -80,7 +80,8 @@
    {:id "ou"
     :alias   "Organisation Units"
     :columns [{:id         "id"
-               :dataType   "string"}
+               :dataType   "string"
+               :filterable true}
               {:id         "level"
                :dataType   "int"
                :columnType "discrete"}
@@ -118,65 +119,87 @@
 (defn index-of "First index of item mapping k to v" [coll k v]
   (first (indices #(= v (k %)) coll)))
 
-(defn get-tables [connection-data]
-  (into
-   [ou-table]
-   (for [{:keys [id aggregationType displayName valueType]} (vals (:dimensions connection-data))
-         :let [agg-type (get {"AVERAGE" "avg"
-                              "COUNT" "count"
-                              "SUM" "sum"}
-                             aggregationType)
-               data-type (get {"BOOLEAN" "bool"
-                               "DATE" "date"
-                               "DATETIME" "datetime"
-                               "INTEGER" "int"
-                               "INTEGER_NEGATIVE" "int"
-                               "INTEGER_POSITIVE" "int"
-                               "INTEGER_ZERO_OR_POSITIVE" "int"
-                               "NUMBER" "float"
-                               "PERCENTAGE" "float"}
-                              valueType "string")]]
-     {:endpoint "/api/26/analytics/rawData.json"
-      :req {:query-params {:dimension ["co" "ou:LEVEL-1" "pe:LAST_YEAR" (str "dx:" id)]}}
-       
-      :table-info
-      {:id id
-       :alias displayName
-       :columns [{:id "co"
-                  :dataType "string"
-                  :alias "Category option combo ID"}
-                 {:id "co_val"
+(defn get-analytics-table [{:keys [period org-unit-level dimensions-map]}]
+  (let [dimensions (vals dimensions-map)
+        endpoint "/api/26/analytics"
+        query-params {:dimension ["co"
+                                  (str "ou:LEVEL-" (:level org-unit-level))
+                                  (str "pe:" (:id period))
+                                  (str "dx:" (clojure.string/join ";" (map :id dimensions)))]}]
+    {:endpoint endpoint
+     :req {:query-params query-params}
+     
+     :table-info
+     {:id "analytics"
+      :alias "Selected data"
+      :description (str "Source endpoint: " endpoint " query params: " query-params)
+      :columns (concat
+                [{:id "co"
                   :dataType "string"
                   :alias "Category option combo"}
+                 {:id "co_name"
+                  :dataType "string"
+                  :alias "Category option combo (name)"}
                  {:id "ou"
                   :dataType "string"
-                  :alias "Organisation unit ID"}
+                  :alias "Organisation unit"
+                  :foreignKey {:tableId "ou" :columnId "id"}}
+                 {:id "ou_name"
+                  :dataType "string"
+                  :alias "Organisation unit (name)"}
                  {:id "pe"
                   :dataType "string"
                   :alias "Period"}
-                 {:id "value"
-                  :dataType data-type
-                  :alias (str "Value of " displayName)
-                  :aggType agg-type}]}
-      :response->rows
-      (fn [response]
-        (let [headers (-> response :body :headers)
-              meta-items (-> response :body :metaData :items)
-              co-index (index-of headers :name "co")
-              ou-index (index-of headers :name "ou")
-              pe-index (index-of headers :name "pe")
-              value-index (index-of headers :name "value")]
-          (->> response
-               :body
-               :rows
-               (map (fn [row]
-                      {:co (nth row co-index)
-                       :co_val (:name (get meta-items (keyword (nth row co-index))))
-                       :ou (nth row ou-index)
-                       :pe (nth row pe-index)
-                       :value (nth row value-index)})))))})))
+                 {:id "pe_name"
+                  :dataType "string"
+                  :alias "Period (name)"}]
+                (map
+                 (fn [{:keys [id aggregationType displayName valueType] :as dimension}]
+                   (let [agg-type (get {"AVERAGE" "avg"
+                                        "COUNT" "count"
+                                        "SUM" "sum"}
+                                       aggregationType)
+                         data-type (get {"BOOLEAN" "bool"
+                                         "DATE" "date"
+                                         "DATETIME" "datetime"
+                                         "INTEGER" "int"
+                                         "INTEGER_NEGATIVE" "int"
+                                         "INTEGER_POSITIVE" "int"
+                                         "INTEGER_ZERO_OR_POSITIVE" "int"
+                                         "NUMBER" "float"
+                                         "PERCENTAGE" "float"}
+                                        valueType "string")]
+                     {:id id
+                      :dataType data-type
+                      :alias displayName
+                      :aggType agg-type}))
+                 dimensions))}
 
-(defn get-standard-connections "Join each dimension to the ou table"
+     :response->rows
+     (fn [response]
+       (let [headers (-> response :body :headers)
+             meta-items (-> response :body :metaData :items)
+             with-names (fn [row column-id name-column-id]
+                          (let [index (index-of headers :name (str column-id))
+                                value (nth row index)
+                                name (:name (get meta-items (keyword value)))]
+                            {column-id value
+                             name-column-id name}))
+             dx-index (index-of headers :name "dx")
+             value-index (index-of headers :name "value")]
+         (->> response
+              :body
+              :rows
+              (map (fn [row]
+                     (merge (with-names row "co" "co_name")
+                            (with-names row "ou" "ou_name")
+                            (with-names row "pe" "pe_names")
+                            {(nth row dx-index) (nth row value-index)}))))))}))
+
+(defn get-tables [connection-data]
+  [ou-table (get-analytics-table connection-data)])
+
+(defn get-standard-connections "Join other table(s) to the ou table"
   [connection-data]
   (let [tables (get-tables connection-data)
         ou-table (find-table-by-id tables "ou")
@@ -209,7 +232,7 @@
     (map :table-info (get-tables (:connection-data @wdc-state))))
   (-get-standard-connections [this]
     (get-standard-connections (:connection-data @wdc-state)))
-  (-get-rows! [this rows-chan table-info inc-val]
+  (-get-rows! [this rows-chan table-info inc-val filter-values]
     (let [id (:id table-info)
           tables (get-tables (:connection-data @wdc-state))]
       (when-let [{:keys [endpoint req response->rows]} (find-table-by-id tables id)]
@@ -279,7 +302,7 @@
         "Sign In"]]]]]])
 
 ; not used - the rawData API seems to ignore startDate/endDate
-(defn select-date-component [selection-a {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
+(defn select-date-component [a-selection {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
   (let [invalid? (r/atom nil)
         zero-pad #(if (< % 10) (str "0" %) (str %))
         format (fn [date] (str (.getUTCFullYear date) "-" (zero-pad (inc (.getUTCMonth date))) "-" (zero-pad (.getUTCDate date))))
@@ -288,11 +311,11 @@
                           date (js/Date. text)]
                       (reset! invalid? (validate date))
                       (when-not @invalid?
-                        (reset! selection-a date))))]
+                        (reset! a-selection date))))]
     (fn []
       [:form-group {:class (if @invalid? "has-error" "has-success")}
-       [:input.form-control {:type "date" :value (if @selection-a (format @selection-a) "") :on-change on-change}]
-       [:span.help-block.small (when @selection-a (format @selection-a))]])))
+       [:input.form-control {:type "date" :value (if @a-selection (format @a-selection) "") :on-change on-change}]
+       [:span.help-block.small (when @a-selection (format @a-selection))]])))
 
 (defn select-component
   "A <select> (combo) component.
@@ -304,29 +327,36 @@
   :display-by function that takes an item and returns a string to be displayed
   :index-by function that takes an item and returns a string id
   :size how many lines to show
-  :multiple? whether to allow multiple selection"
-  [selection-a items-a {:keys [display-by index-by size multiple?]
-                        :or {display-by :displayName index-by :id size 5 multiple? true}}]
-  (let [items-index-a (r/track #(indexed index-by @items-a))
+  :multiple? whether to allow multiple selection
+  :keywordize? whether the keys of the index of selected items need to be keywordized"
+  [a-selection a-items {:keys [display-by index-by size multiple? keywordize?]
+                        :or {display-by :displayName index-by :id size 5 multiple? true keywordize? true}}]
+  (let [get-id (fn [v] (if keywordize? (keyword v) v))
+        a-items-index (r/track #(indexed (comp get-id index-by) @a-items))
         on-select-change (fn [e]
                            (let [selection
                                  (if multiple?
                                    (let [js-options (-> e (aget "target") (aget "options"))
-                                         options (for [i (range (aget js-options "length")) :let [option (aget js-options i)]] option)
-                                         selected (filter (fn [option] (aget option "selected")) options)
-                                         ids (map (fn [option] (aget option "value")) selected)
-                                         items (select-keys @items-index-a ids)]
+                                         options (for [i (range (aget js-options "length"))] (aget js-options i))
+                                         items (->> options
+                                                    (filter (fn [option] (aget option "selected")))
+                                                    (map (fn [option] (aget option "value")))
+                                                    (map get-id)
+                                                    (select-keys @a-items-index))]
                                      items)
-                                   (let [id (-> e (aget "target") (aget "value"))
-                                         item (get @items-index-a id)]
+                                   (let [id (-> e (aget "target") (aget "value") get-id)
+                                         item (get @a-items-index id)]
                                      item))]
-                             (reset! selection-a selection)))
+                             (reset! a-selection selection)))
         default-value (if multiple?
-                        (or (keys @selection-a) [])
-                        (or (index-by @selection-a) ""))]
+                        (or (keys @a-selection) [])
+                        (or (index-by @a-selection) ""))]
     (fn []
+      (when-not multiple?
+        (when-not @a-selection
+          (reset! a-selection (first @a-items))))
       [:select.form-control {:default-value default-value :on-change on-select-change :size size :multiple multiple?}
-       (for [item @items-a]
+       (for [item @a-items]
          ^{:key item} [:option {:value (index-by item)} (display-by item)])])))
 
 (defn select-filtered-component
@@ -335,18 +365,18 @@
   The first argument is an atom holding the selected item or index of selected items (see docs for select-component).
   The second argument is a function that takes the filter string and an atom, and resets the atom to filtered items.
   The third argument is passed through to select-component."
-  [selection-a get-items! opts]
-  (let [filter-a (r/atom "")
-        items-a (r/atom nil)]
+  [a-selection get-items! opts]
+  (let [a-filter (r/atom "")
+        a-items (r/atom nil)]
     (fn []
-      (get-items! @filter-a items-a)
+      (get-items! @a-filter a-items)
       [:div.container
        [:div.row
-        [:input.form-control (bind filter-a :type "text" :placeholder "Filter")]]
+        [:input.form-control (bind a-filter :type "text" :placeholder "Filter")]]
        [:div.row
-        [select-component selection-a items-a opts]]])))
+        [select-component a-selection a-items opts]]])))
 
-(defn get-dimensions! [s a]
+(defn get-dimensions-map! [s a]
   (let [req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"]}
                                  (when-not (clojure.string/blank? s)
                                    {:filter (str "displayName:ilike:" s)}))}]
@@ -354,17 +384,17 @@
       (when-let [{:keys [body]} (async/<! (request "/api/26/dataElements" req))]
         (reset! a (:dataElements body))))))
 
-(defn dimensions-select-component [selection-a]
-  (let [top-a (r/atom nil)
-        bottom-a (r/atom nil)
-        add! (fn [] (swap! selection-a merge @top-a))
-        remove! (fn [] (reset! selection-a (apply dissoc @selection-a (keys @bottom-a))))]
+(defn dimensions-map-select-component [a-selection]
+  (let [a-top (r/atom nil)
+        a-bottom (r/atom nil)
+        add! (fn [] (swap! a-selection merge @a-top))
+        remove! (fn [] (reset! a-selection (apply dissoc @a-selection (keys @a-bottom))))]
     (fn []
       [:div
        [:div.form-group
         [:label.col-sm-3.control-label "Available dimensions"]
         [:div.col-sm-9
-         [select-filtered-component top-a get-dimensions! {:filter? true :size 25}]]]
+         [select-filtered-component a-top get-dimensions-map! {:filter? true :size 25}]]]
        [:div.form-group
         [:div.col-sm-offset-3.col-sm-9
          [:div.btn-group
@@ -375,20 +405,60 @@
        [:div.form-group
         [:label.col-sm-3.control-label "Selected dimensions"]
         [:div.col-sm-9
-         [select-component bottom-a (r/track #(sort-by :displayName (vals @selection-a))) {:size 5}]]]])))
+         [select-component a-bottom (r/track #(sort-by :displayName (vals @a-selection))) {:size 5}]]]])))
+
+(defn get-org-unit-levels! [a]
+  (async/go
+    (when-let [{:keys [body]} (async/<! (request "/api/26/filledOrganisationUnitLevels"
+                                                {:query-params {:fields ["id" "displayName" "level"]}}))]
+      (reset! a body))))
+
+(defn org-unit-level-select-component [a-selection]
+  (let [a-items (r/atom nil)]
+    (get-org-unit-levels! a-items)
+    (fn []
+      [select-component a-selection a-items {:multiple? false :size 1}])))
+
+(def periods
+  (map (fn [id] {:id id :displayName (-> id (clojure.string/replace "_" " ") (clojure.string/capitalize))})
+       ["THIS_MONTH" "LAST_MONTH" "THIS_BIMONTH" "LAST_BIMONTH" "THIS_QUARTER" "LAST_QUARTER"
+        "THIS_SIX_MONTH" "LAST_SIX_MONTH" "MONTHS_THIS_YEAR" "QUARTERS_THIS_YEAR"
+        "THIS_YEAR" "MONTHS_LAST_YEAR" "QUARTERS_LAST_YEAR" "LAST_YEAR" "LAST_5_YEARS" "LAST_12_MONTHS"
+        "LAST_3_MONTHS" "LAST_6_BIMONTHS" "LAST_4_QUARTERS" "LAST_2_SIXMONTHS" "THIS_FINANCIAL_YEAR"
+        "LAST_FINANCIAL_YEAR" "LAST_5_FINANCIAL_YEARS"
+        "THIS_WEEK" "LAST_WEEK" "LAST_4_WEEKS" "LAST_12_WEEKS" "LAST_52_WEEKS"]))
+
+(defn period-select-component [a-selection]
+  (let [a-items (r/atom periods)]
+    [select-component a-selection a-items {:multiple? false :size 1}]))
 
 (defn data-missing? []
-  (empty? (get-in @wdc-state [:connection-data :dimensions])))
+  (let [data (:connection-data @wdc-state)]
+    (some nil? [(first (:dimensions-map data))
+                (:period data)
+                (:org-unit-level data)])))
 
 (defn choose-data-component []
-  [:div.panel.panel-primary
-   [:div.panel-heading (str "Welcome, " (get-in @app-state [:user :displayName]) "!")]
-   [:div.panel-body
-    [:form.form-horizontal
-     [dimensions-select-component (r/cursor wdc-state [:connection-data :dimensions])]
-     [:div.form-group
-      [:div.col-sm-offset-3.col-sm-9
-       [:button.btn.btn-default {:type "button" :disabled (data-missing?) :on-click #(wdc/go! wdc)} "Go!"]]]]]])
+  (let [disabled (data-missing?)]
+    [:div.panel.panel-primary
+     [:div.panel-heading (str "Welcome, " (get-in @app-state [:user :displayName]) "!")]
+     [:div.panel-body
+      [:p.lead "Please choose the data you'd like to import:"]
+      [:form.form-horizontal
+       [:div.form-group
+        [:label.col-sm-3.control-label "Period"]
+        [:div.col-sm-9
+         [period-select-component (r/cursor wdc-state [:connection-data :period])]
+         [:small "Week-level periods may not be reported."]]]
+       [:div.form-group
+        [:label.col-sm-3.control-label "Organisation Unit Level"]
+        [:div.col-sm-9
+         [org-unit-level-select-component (r/cursor wdc-state [:connection-data :org-unit-level])]]]
+       [dimensions-map-select-component (r/cursor wdc-state [:connection-data :dimensions-map])]
+       [:div.form-group
+        [:div.col-sm-offset-3.col-sm-9
+         [:button.btn.btn-default {:type "button" :disabled disabled :on-click #(wdc/go! wdc)} "Go!"]
+         (when disabled [:div.small.error "Please select a period, organisation unit level, and some dimensions."])]]]]]))
 
 (defn ui-component []
   (if (:user @app-state)

@@ -11,8 +11,9 @@
 (s/def ::id (s/and string? #(re-matches #"\w+" %)))
 (s/def ::alias string?)
 (s/def ::description string?)
-(s/def ::incrementColumnId string?)
+(s/def ::incrementColumnId ::id)
 (s/def ::joinOnly boolean?)
+(s/def ::filterable boolean?)
 (s/def ::dataType #{"bool" "date" "datetime" "float" "int" "string"})
 (s/def ::aggType #{"avg" "count" "count_dist" "median" "sum"})
 (s/def ::columnRole #{"dimension" "measure"})
@@ -20,6 +21,7 @@
 (s/def ::geoRole #{"area_code" "cbsa_msa" "city" "congressional_district" "country_region" "county" "state_province" "zip_code_postcode"})
 (s/def ::numberFormat #{"currency" "number" "percentage" "scientific"})
 (s/def ::unitsFormat #{"billions_english" "billions_standard" "millions" "thousands"})
+(s/def ::foreignKey (s/keys :req-un [::tableId ::columnId]))
 (s/def ::columnInfo (s/keys :req-un [::dataType
                                      ::id]
                             :opt-un [::aggType
@@ -29,7 +31,9 @@
                                      ::description
                                      ::geoRole
                                      ::numberFormat
-                                     ::unitsFormat]))
+                                     ::unitsFormat
+                                     ::filterable
+                                     ::foreignKey]))
 (s/def ::columns (s/coll-of ::columnInfo))
 (s/def ::tableInfo (s/keys :req-un [::columns
                                     ::id]
@@ -53,7 +57,7 @@
   (-get-name [this] "Connection name")
   (-get-table-infos [this] "Array of TableInfo objects")
   (-get-standard-connections [this] "Array of StandardConnection objects (describing predefined table joins) (optional)")
-  (-get-rows! [this rows-chan table-info inc-val] "Asynchronously put arrays of rows into the provided channel")
+  (-get-rows! [this rows-chan table-info inc-val filter-values] "Asynchronously put arrays of rows into the provided channel")
   (-shutdown [this] "Called when the current WDC phase ends. Must return ::state which needs to be persisted.")
   (-init [this phase state] "Called when a new WDC phase is entered. ::state saved at the end of previous phase is provided."))
 
@@ -97,10 +101,11 @@
   (println "get-data")
   (let [js-table-info (aget js-table "tableInfo")
         inc-val (aget js-table "incrementValue")
+        filter-values (js->clj (aget js-table "filterValues"))
         append-rows (aget js-table "appendRows")
         table-info (s/assert ::tableInfo (js->clj js-table-info :keywordize-keys true))
         rows-chan (async/chan)]
-    (-get-rows! w rows-chan table-info inc-val)
+    (-get-rows! w rows-chan table-info inc-val filter-values)
     (async/go-loop [total 0]
       (if-let [rows (async/<! rows-chan)]
         (do
