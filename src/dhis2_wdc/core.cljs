@@ -69,6 +69,7 @@
   (case status
     200 (cb body)
     (401 403) (do (swap! wdc-state assoc-in [:connection-data :user] nil)
+                  (swap! app-state assoc :last-error "Please sign in")
                   nil)
     (do (let [err (str "HTTP " status ": " body)]
           (if (:show-ui? @app-state)
@@ -398,20 +399,20 @@
   "A component combining a filter string input box and a <select> combo
 
   The first argument is an atom holding the selected item or index of selected items (see docs for select-component).
-  The second argument is a function that takes the filter string and an atom, and resets the atom to filtered items.
+  The second argument is a function that takes the filter string and a callback, which it should call when the items are ready.
   The third argument is passed through to select-component."
-  [a-selection get-items! opts]
+  [a-selection get-items opts]
   (let [a-filter (r/atom "")
         a-items (r/atom nil)]
     (fn []
-      (get-items! @a-filter a-items)
+      (get-items @a-filter #(reset! a-items %))
       [:div.container
        [:div.row
         [:input.form-control (bind a-filter :type "text" :placeholder "Search for...")]]
        [:div.row
         [select-component a-selection a-items opts]]])))
 
-(defn get-dimensions-map! [s a]
+(defn get-dimensions-map [s cb]
   (let [req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"]}
                                  (when-not (clojure.string/blank? s)
                                    {:filter (str "displayName:ilike:" s)}))}]
@@ -419,7 +420,7 @@
      "/api/26/dataElements"
      req
      (fn [body]
-       (reset! a (:dataElements body))))))
+       (cb (:dataElements body))))))
 
 (defn dimensions-map-select-component [a-selection]
   (let [a-top (r/atom nil)
@@ -431,7 +432,7 @@
        [:div.form-group
         [:label.col-sm-3.control-label "Available dimensions"]
         [:div.col-sm-9
-         [select-filtered-component a-top get-dimensions-map! {:filter? true :size 25}]]]
+         [select-filtered-component a-top get-dimensions-map {:filter? true :size 25}]]]
        [:div.form-group
         [:div.col-sm-offset-3.col-sm-9
          [:div.btn-group
@@ -444,16 +445,15 @@
         [:div.col-sm-9
          [select-component a-bottom (r/track #(sort-by :displayName (vals @a-selection))) {:size 5}]]]])))
 
-(defn get-org-unit-levels! [a]
+(defn get-org-unit-levels [cb]
   (request
    "/api/26/filledOrganisationUnitLevels"
    {:query-params {:fields ["id" "displayName" "level"]}}
-   (fn [body]
-     (reset! a body))))
+   cb))
 
 (defn org-unit-level-select-component [a-selection]
   (let [a-items (r/atom nil)]
-    (get-org-unit-levels! a-items)
+    (get-org-unit-levels #(reset! a-items %))
     (fn []
       [select-component a-selection a-items {:multiple? false :size 1}])))
 
@@ -504,7 +504,8 @@
       [error-component]]]))
 
 (defn ui-component []
-  (if (get-in @wdc-state [:connection-data :user])
+  (if (and (:password @wdc-state)
+           (get-in @wdc-state [:connection-data :user]))
     [choose-data-component]
     [sign-in-component]))
 

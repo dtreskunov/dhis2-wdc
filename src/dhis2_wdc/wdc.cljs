@@ -24,7 +24,7 @@
   (set! *print-err-fn*
     (fn [& args]
       (let [a (into-array args)]
-        (.apply (.-log js/tableau) js/console a))))
+        (.apply (.-log js/tableau) js/tableau a))))
   nil)
 
 (enable-console-print!)
@@ -111,9 +111,7 @@
 (defn get-phase
   "Returns the current WDC phase"
   []
-  (s/assert
-   ::phase
-   (.-phase js/tableau)))
+  (s/assert ::phase (.-phase js/tableau)))
 
 (def api-version "2.2")
 
