@@ -52,6 +52,7 @@
                            :optimizations :advanced
                            ;:infer-externs true
                            :externs ["src/externs.js"]
+                           :elide-asserts true
                            :pretty-print false}}]}
 
   :figwheel {;; :http-server-root "public" ;; default and assumes "resources"

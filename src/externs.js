@@ -4,3 +4,4 @@ tableau.reportProgress;
 tableau.makeConnector;
 tableau.registerConnector;
 tableau.submit;
+tableau.log;

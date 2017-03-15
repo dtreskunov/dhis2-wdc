@@ -8,7 +8,6 @@
 
 ; (set! *warn-on-infer* true)
 
-(enable-console-print!)
 (declare render)
 
 (defn deep-merge-with [f & maps]
@@ -41,13 +40,20 @@
 (defn wrap-accept [[url opts]]
   [url (merge-with merge opts {:headers {"Accept" "application/json"}})])
 
+(defonce app-state
+  (r/atom
+   {:request-count 0
+    :show-ui? true
+    :called-by-tableau? false}))
+
 (defonce wdc-state
   (r/atom
-   {:connection-data {:cors-proxy "dtreskunov-cors-anywhere.herokuapp.com"}
+   {:connection-data {:cors-proxy "dtreskunov-cors-anywhere.herokuapp.com" :user nil}
     :username nil
     :password nil}))
 
-(defn request [endpoint & [req]]
+(defn <request [endpoint & [req]]
+  (swap! app-state update-in [:request-count] inc)
   (let [username (:username @wdc-state)
         password (:password @wdc-state)
         {:keys [baseurl cors-proxy]} (:connection-data @wdc-state)]
@@ -58,60 +64,85 @@
          (wrap-accept)
          (apply http/get))))
 
-(defn paginate [out xform endpoint & [req]]
-  (async/go-loop [req req]
-    (when-let [response (async/<! (request endpoint req))]
-      (async/>! out (xform response))
-      (let [page  (-> response :body :pager :page)
-            count (-> response :body :pager :pageCount)
-            next (when (< page count) (assoc-in req [:query-params :page] (inc page)))]
-        (if next
-          (recur next)
-          (async/close! out))))))
+(defn handle-response [{:keys [status body]} cb]
+  (swap! app-state update-in [:request-count] dec)
+  (case status
+    200 (cb body)
+    (401 403) (do (swap! wdc-state assoc-in [:connection-data :user] nil)
+                  nil)
+    (do (let [err (str "HTTP " status ": " body)]
+          (if (:show-ui? @app-state)
+            (swap! app-state assoc :last-error err)
+            (throw err)))
+        nil)))
+
+(defn request [endpoint req cb]
+  (async/go
+    (handle-response
+     (async/<! (<request endpoint req))
+     cb)))
+
+(defn <paginate [endpoint req xform]
+  (let [out (async/chan)]
+    (async/go-loop [req req]
+      (when-let [body (handle-response (async/<! (<request endpoint req)) identity)]
+        (let [page (-> body :pager :page)
+              count (-> body :pager :pageCount)
+              next (when (< page count) (assoc-in req [:query-params :page] (inc page)))
+              val (xform body)]
+          (async/>! out val)
+          (if next
+            (recur next)
+            (async/close! out)))))
+    out))
 
 (defn indexed [f coll]
   (into {} (map (fn [x] [(f x) x]) coll)))
 
-(def ou-table
-  {:endpoint "/api/26/organisationUnits"
-   :req {:query-params {:fields "id,level,featureType,displayName,coordinates"}}
+(defprotocol ITable
+  (table-info [this])
+  (<get-rows [this increment-value filter-values]))
 
-   :table-info
-   {:id "ou"
-    :alias   "Organisation Units"
-    :columns [{:id         "id"
-               :dataType   "string"
-               :filterable true}
-              {:id         "level"
-               :dataType   "int"
-               :columnType "discrete"}
-              {:id         "displayName"
-               :dataType   "string"}
-              {:id         "featureType"
-               :dataType   "string"}
-              {:id         "lat"
-               :dataType   "float"
-               :columnRole "dimension"}
-              {:id         "lon"
-               :dataType   "float"
-               :columnRole "dimension"}]}
-
-   :response->rows
-   (fn [response]
-     (->> response
-          :body
-          :organisationUnits
-          (map (fn [{:keys [id level featureType displayName coordinates]}]
-                 (let [[lon lat] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
-                   {:id id
-                    :level level
-                    :featureType featureType
-                    :displayName displayName
-                    :lat lat
-                    :lon lon})))))})
+(defn get-ou-table [{:keys [org-unit-level]}]
+  (reify ITable
+    (table-info [_]
+      {:id "ou"
+      :alias   "Organisation Units"
+      :columns [{:id         "id"
+                 :dataType   "string"
+                 :filterable true}
+                {:id         "level"
+                 :dataType   "int"
+                 :columnType "discrete"}
+                {:id         "displayName"
+                 :dataType   "string"}
+                {:id         "featureType"
+                 :dataType   "string"}
+                {:id         "lat"
+                 :dataType   "float"
+                 :columnRole "dimension"}
+                {:id         "lon"
+                 :dataType   "float"
+                 :columnRole "dimension"}]})
+    (<get-rows [_ increment-value filter-values]
+      (<paginate
+       "/api/26/organisationUnits"
+       {:query-params {:fields "id,level,featureType,displayName,coordinates"
+                       :level (:level org-unit-level)}}
+       (fn [body]
+         (->> body
+              :organisationUnits
+              (map (fn [{:keys [id level featureType displayName coordinates]}]
+                     (let [[lon lat] (when (= featureType "POINT") (js->clj (.parse js/JSON coordinates)))]
+                       {:id id
+                        :level level
+                        :featureType featureType
+                        :displayName displayName
+                        :lat lat
+                        :lon lon})))))))))
 
 (defn find-table-by-id [tables id]
-  (first (filter #(= id (-> % :table-info :id)) tables)))
+  (first (filter #(= id (-> % table-info :id)) tables)))
 
 (defn indices [pred coll]
   (keep-indexed #(when (pred %2) %1) coll))
@@ -126,88 +157,87 @@
                                   (str "ou:LEVEL-" (:level org-unit-level))
                                   (str "pe:" (:id period))
                                   (str "dx:" (clojure.string/join ";" (map :id dimensions)))]}]
-    {:endpoint endpoint
-     :req {:query-params query-params}
-     
-     :table-info
-     {:id "analytics"
-      :alias "Selected data"
-      :description (str "Source endpoint: " endpoint " query params: " query-params)
-      :columns (concat
-                [{:id "co"
-                  :dataType "string"
-                  :alias "Category option combo"}
-                 {:id "co_name"
-                  :dataType "string"
-                  :alias "Category option combo (name)"}
-                 {:id "ou"
-                  :dataType "string"
-                  :alias "Organisation unit"
-                  :foreignKey {:tableId "ou" :columnId "id"}}
-                 {:id "ou_name"
-                  :dataType "string"
-                  :alias "Organisation unit (name)"}
-                 {:id "pe"
-                  :dataType "string"
-                  :alias "Period"}
-                 {:id "pe_name"
-                  :dataType "string"
-                  :alias "Period (name)"}]
-                (map
-                 (fn [{:keys [id aggregationType displayName valueType] :as dimension}]
-                   (let [agg-type (get {"AVERAGE" "avg"
-                                        "COUNT" "count"
-                                        "SUM" "sum"}
-                                       aggregationType)
-                         data-type (get {"BOOLEAN" "bool"
-                                         "DATE" "date"
-                                         "DATETIME" "datetime"
-                                         "INTEGER" "int"
-                                         "INTEGER_NEGATIVE" "int"
-                                         "INTEGER_POSITIVE" "int"
-                                         "INTEGER_ZERO_OR_POSITIVE" "int"
-                                         "NUMBER" "float"
-                                         "PERCENTAGE" "float"}
-                                        valueType "string")]
-                     {:id id
-                      :dataType data-type
-                      :alias displayName
-                      :aggType agg-type}))
-                 dimensions))}
-
-     :response->rows
-     (fn [response]
-       (let [headers (-> response :body :headers)
-             meta-items (-> response :body :metaData :items)
-             with-names (fn [row column-id name-column-id]
-                          (let [index (index-of headers :name (str column-id))
-                                value (nth row index)
-                                name (:name (get meta-items (keyword value)))]
-                            {column-id value
-                             name-column-id name}))
-             dx-index (index-of headers :name "dx")
-             value-index (index-of headers :name "value")]
-         (->> response
-              :body
-              :rows
-              (map (fn [row]
-                     (merge (with-names row "co" "co_name")
-                            (with-names row "ou" "ou_name")
-                            (with-names row "pe" "pe_names")
-                            {(nth row dx-index) (nth row value-index)}))))))}))
+    (reify ITable
+      (table-info [_]
+        {:id "analytics"
+         :alias "Selected data"
+         :description (str "Source endpoint: " endpoint " query params: " query-params)
+         :columns (concat
+                   [{:id "co"
+                     :dataType "string"
+                     :alias "Category option combo"}
+                    {:id "co_name"
+                     :dataType "string"
+                     :alias "Category option combo (name)"}
+                    {:id "ou"
+                     :dataType "string"
+                     :alias "Organisation unit"
+                     :foreignKey {:tableId "ou" :columnId "id"}}
+                    {:id "ou_name"
+                     :dataType "string"
+                     :alias "Organisation unit (name)"}
+                    {:id "pe"
+                     :dataType "string"
+                     :alias "Period"}
+                    {:id "pe_name"
+                     :dataType "string"
+                     :alias "Period (name)"}]
+                   (map
+                    (fn [{:keys [id aggregationType displayName valueType] :as dimension}]
+                      (let [agg-type (get {"AVERAGE" "avg"
+                                           "COUNT" "count"
+                                           "SUM" "sum"}
+                                          aggregationType)
+                            data-type (get {"BOOLEAN" "bool"
+                                            "DATE" "date"
+                                            "DATETIME" "datetime"
+                                            "INTEGER" "int"
+                                            "INTEGER_NEGATIVE" "int"
+                                            "INTEGER_POSITIVE" "int"
+                                            "INTEGER_ZERO_OR_POSITIVE" "int"
+                                            "NUMBER" "float"
+                                            "PERCENTAGE" "float"}
+                                           valueType "string")]
+                        {:id id
+                         :dataType data-type
+                         :alias displayName
+                         :aggType agg-type}))
+                    dimensions))})
+      (<get-rows [_ increment-value filter-values]
+        (<paginate
+         endpoint
+         {:query-params query-params}
+         (fn [body]
+           (let [headers (-> body :headers)
+                 meta-items (-> body :metaData :items)
+                 with-names (fn [row column-id name-column-id]
+                              (let [index (index-of headers :name (str column-id))
+                                    value (nth row index)
+                                    name (:name (get meta-items (keyword value)))]
+                                {column-id value
+                                 name-column-id name}))
+                 dx-index (index-of headers :name "dx")
+                 value-index (index-of headers :name "value")]
+             (->> body
+                  :rows
+                  (map (fn [row]
+                         (merge (with-names row "co" "co_name")
+                                (with-names row "ou" "ou_name")
+                                (with-names row "pe" "pe_names")
+                                {(nth row dx-index) (nth row value-index)})))))))))))
 
 (defn get-tables [connection-data]
-  [ou-table (get-analytics-table connection-data)])
+  ((juxt get-ou-table get-analytics-table) connection-data))
 
 (defn get-standard-connections "Join other table(s) to the ou table"
   [connection-data]
   (let [tables (get-tables connection-data)
         ou-table (find-table-by-id tables "ou")
-        ou-alias (-> ou-table :table-info :alias)]
+        ou-alias (-> ou-table table-info :alias)]
     (when ou-table
       (mapcat
-       (fn [{:keys [table-info]}]
-         (let [{:keys [id alias]} table-info]
+       (fn [table]
+         (let [{:keys [id alias]} (table-info table)]
            (when-not (= "ou" id)
              [{:alias (str alias ", joined to " ou-alias)
                :tables [{:id id :alias alias}
@@ -217,29 +247,24 @@
                         :joinType :left}]}])))
        tables))))
 
-(defonce app-state
-  (r/atom
-   {:show-ui? true
-    :called-by-tableau? false
-    :user nil}))
-
 (deftype DHIS2WDC []
   wdc/IWebDataConnector
-  (-get-auth-type [this] "basic")
-  (-get-name [this]
+  (get-auth-type [this] "basic")
+  (get-name [this]
     (str "DHIS2 Connection to " (get-in @wdc-state [:connection-data :baseurl])))
-  (-get-table-infos [this]
-    (map :table-info (get-tables (:connection-data @wdc-state))))
-  (-get-standard-connections [this]
+  (get-table-infos [this]
+    (map table-info (get-tables (:connection-data @wdc-state))))
+  (get-standard-connections [this]
     (get-standard-connections (:connection-data @wdc-state)))
-  (-get-rows! [this rows-chan table-info inc-val filter-values]
+  (<get-rows [this table-info increment-value filter-values]
     (let [id (:id table-info)
-          tables (get-tables (:connection-data @wdc-state))]
-      (when-let [{:keys [endpoint req response->rows]} (find-table-by-id tables id)]
-        (paginate rows-chan response->rows endpoint req))))
-  (-shutdown [this]
+          tables (get-tables (:connection-data @wdc-state))
+          table (find-table-by-id tables id)]
+      (when-not table (throw (str "Don't know how to get rows of table with id " id)))
+      (<get-rows table increment-value filter-values)))
+  (shutdown [this]
     @wdc-state)
-  (-init [this phase preserved-state]
+  (init [this phase preserved-state]
     (swap! wdc-state deep-merge preserved-state)
     (swap! app-state merge {:show-ui? (#{"auth" "interactive"} phase)
                             :auth-only? (= "auth" phase)
@@ -264,13 +289,22 @@
            :on-change on-change)))
 
 (defn sign-in! []
-  (let [req (request "/api/26/me" {:query-params {:fields ["id" "displayName"]}})]
-    (async/go
-      (when-let [{:keys [status body]} (async/<! req)]
-        (when (= 200 status)
-          (if (:auth-only? @app-state)
-            (wdc/go! wdc)
-            (swap! app-state assoc :user body)))))))
+  (request
+   "/api/26/me"
+   {:query-params {:fields ["id" "displayName"]}}
+   (fn [body]
+     (swap! wdc-state assoc-in [:connection-data :user] body)
+     (when (:auth-only? @app-state)
+       (wdc/go! wdc)))))
+
+(defn error-component []
+  (let [last-error (:last-error @app-state)]
+    (when last-error
+      (async/go
+        (async/<! (async/timeout 5000))
+        (swap! app-state dissoc :last-error))
+      [:div.alert.alert-danger
+       [:span last-error]])))
 
 (defn sign-in-component []
   [:div.panel.panel-primary
@@ -299,7 +333,8 @@
        [:button.btn.btn-default {:on-click sign-in!
                                  :type "button"
                                  :disabled (has-blanks? @wdc-state [:connection-data :baseurl] :username :password)}
-        "Sign In"]]]]]])
+        "Sign In"]]]]
+    [error-component]]])
 
 ; not used - the rawData API seems to ignore startDate/endDate
 (defn select-date-component [a-selection {:keys [validate] :or {validate #(= NaN (.getTime %))}}]
@@ -372,7 +407,7 @@
       (get-items! @a-filter a-items)
       [:div.container
        [:div.row
-        [:input.form-control (bind a-filter :type "text" :placeholder "Filter")]]
+        [:input.form-control (bind a-filter :type "text" :placeholder "Search for...")]]
        [:div.row
         [select-component a-selection a-items opts]]])))
 
@@ -380,9 +415,11 @@
   (let [req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"]}
                                  (when-not (clojure.string/blank? s)
                                    {:filter (str "displayName:ilike:" s)}))}]
-    (async/go
-      (when-let [{:keys [body]} (async/<! (request "/api/26/dataElements" req))]
-        (reset! a (:dataElements body))))))
+    (request
+     "/api/26/dataElements"
+     req
+     (fn [body]
+       (reset! a (:dataElements body))))))
 
 (defn dimensions-map-select-component [a-selection]
   (let [a-top (r/atom nil)
@@ -408,10 +445,11 @@
          [select-component a-bottom (r/track #(sort-by :displayName (vals @a-selection))) {:size 5}]]]])))
 
 (defn get-org-unit-levels! [a]
-  (async/go
-    (when-let [{:keys [body]} (async/<! (request "/api/26/filledOrganisationUnitLevels"
-                                                {:query-params {:fields ["id" "displayName" "level"]}}))]
-      (reset! a body))))
+  (request
+   "/api/26/filledOrganisationUnitLevels"
+   {:query-params {:fields ["id" "displayName" "level"]}}
+   (fn [body]
+     (reset! a body))))
 
 (defn org-unit-level-select-component [a-selection]
   (let [a-items (r/atom nil)]
@@ -421,12 +459,11 @@
 
 (def periods
   (map (fn [id] {:id id :displayName (-> id (clojure.string/replace "_" " ") (clojure.string/capitalize))})
-       ["THIS_MONTH" "LAST_MONTH" "THIS_BIMONTH" "LAST_BIMONTH" "THIS_QUARTER" "LAST_QUARTER"
-        "THIS_SIX_MONTH" "LAST_SIX_MONTH" "MONTHS_THIS_YEAR" "QUARTERS_THIS_YEAR"
-        "THIS_YEAR" "MONTHS_LAST_YEAR" "QUARTERS_LAST_YEAR" "LAST_YEAR" "LAST_5_YEARS" "LAST_12_MONTHS"
-        "LAST_3_MONTHS" "LAST_6_BIMONTHS" "LAST_4_QUARTERS" "LAST_2_SIXMONTHS" "THIS_FINANCIAL_YEAR"
-        "LAST_FINANCIAL_YEAR" "LAST_5_FINANCIAL_YEARS"
-        "THIS_WEEK" "LAST_WEEK" "LAST_4_WEEKS" "LAST_12_WEEKS" "LAST_52_WEEKS"]))
+       ["LAST_12_MONTHS" "LAST_12_WEEKS" "LAST_2_SIXMONTHS" "LAST_3_MONTHS" "LAST_4_QUARTERS" "LAST_4_WEEKS"
+        "LAST_52_WEEKS" "LAST_5_FINANCIAL_YEARS" "LAST_5_YEARS" "LAST_6_BIMONTHS" "LAST_BIMONTH"
+        "LAST_FINANCIAL_YEAR" "LAST_MONTH" "LAST_QUARTER" "LAST_SIX_MONTH" "LAST_WEEK" "LAST_YEAR"
+        "MONTHS_LAST_YEAR" "MONTHS_THIS_YEAR" "QUARTERS_LAST_YEAR" "QUARTERS_THIS_YEAR" "THIS_BIMONTH"
+        "THIS_FINANCIAL_YEAR" "THIS_MONTH" "THIS_QUARTER" "THIS_SIX_MONTH" "THIS_WEEK" "THIS_YEAR"]))
 
 (defn period-select-component [a-selection]
   (let [a-items (r/atom periods)]
@@ -439,9 +476,12 @@
                 (:org-unit-level data)])))
 
 (defn choose-data-component []
-  (let [disabled (data-missing?)]
+  (let [data-missing (data-missing?)
+        request-count (:request-count @app-state)
+        requests-in-flight (> request-count 0)
+        disabled (or data-missing requests-in-flight)]
     [:div.panel.panel-primary
-     [:div.panel-heading (str "Welcome, " (get-in @app-state [:user :displayName]) "!")]
+     [:div.panel-heading (str "Welcome, " (get-in @wdc-state [:connection-data :user :displayName]) "!")]
      [:div.panel-body
       [:p.lead "Please choose the data you'd like to import:"]
       [:form.form-horizontal
@@ -456,12 +496,15 @@
          [org-unit-level-select-component (r/cursor wdc-state [:connection-data :org-unit-level])]]]
        [dimensions-map-select-component (r/cursor wdc-state [:connection-data :dimensions-map])]
        [:div.form-group
-        [:div.col-sm-offset-3.col-sm-9
+        [:label.col-sm-3.control-label
+         (when requests-in-flight [:span.glyphicon.glyphicon-hourglass {:title (str request-count " requests")}])]
+        [:div.col-sm-9
          [:button.btn.btn-default {:type "button" :disabled disabled :on-click #(wdc/go! wdc)} "Go!"]
-         (when disabled [:div.small.error "Please select a period, organisation unit level, and some dimensions."])]]]]]))
+         (when data-missing [:div.small.error "Please select a period, organisation unit level, and some dimensions."])]]]
+      [error-component]]]))
 
 (defn ui-component []
-  (if (:user @app-state)
+  (if (get-in @wdc-state [:connection-data :user])
     [choose-data-component]
     [sign-in-component]))
 
