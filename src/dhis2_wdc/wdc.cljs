@@ -1,17 +1,15 @@
 (ns dhis2-wdc.wdc
   (:refer-clojure :exclude [enable-console-print!])
   (:require-macros [cljs.core.async.macros :as async])
-  (:require [cljs.spec :as s]
-            [cljs.core.async :as async]))
+  (:require [cljs.core.async :as async]
+            [cljs.spec :as s]
+            cljsjs.tableauwdc))
 
 ; (set! *warn-on-infer* true)
 
 ; Don't forget to set :elide-asserts to true in your production compiler settings!
 (set! *assert* true)
 (s/check-asserts true)
-
-(when-not (exists? js/tableau)
-  (throw "'tableau' is undefined. Did you forget to include tableauwdc.js before your script?"))
 
 (defn enable-console-print!
   "Set *print-fn* to console.log and tableau.log"
@@ -72,8 +70,6 @@
 (s/def ::authType #{"none" "basic" "custom"})
 
 (s/def ::state (s/keys :opt-un [::connection-data ::username ::password]))
-
-(deftype AuthenticationException [])
 
 (defprotocol IWebDataConnector
   "Web Data Connector protocol"
