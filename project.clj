@@ -6,12 +6,12 @@
 
   :min-lein-version "2.7.1"
 
-  :dependencies [[org.clojure/clojure "1.9.0-alpha14"]
+  :dependencies [[org.clojure/clojure "1.9.0-alpha15"]
                  [org.clojure/clojurescript "1.9.473"]
-                 [org.clojure/core.async "0.3.441" :exclusions [org.clojure/tools.reader]]
-                 [reagent "0.6.0"]
+                 [org.clojure/core.async "0.3.442" :exclusions [org.clojure/tools.reader]]
+                 [reagent "0.6.1"]
                  [cljs-http "0.1.42"]
-                 [cljsjs/tableauwdc "2.2.0-0"]]
+                 [cljsjs/tableauwdc "2.2.0-1"]]
 
   :plugins [[lein-figwheel "0.5.9"]
             [lein-cljsbuild "1.1.5" :exclusions [[org.clojure/clojure]]]]

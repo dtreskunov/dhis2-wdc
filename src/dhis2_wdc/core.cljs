@@ -252,7 +252,7 @@
   wdc/IWebDataConnector
   (get-auth-type [this] "basic")
   (get-name [this]
-    (str "DHIS2 Connection to " (get-in @wdc-state [:connection-data :baseurl])))
+    (str (get-in @wdc-state [:connection-data :baseurl]) " (DHIS2)"))
   (get-table-infos [this]
     (map table-info (get-tables (:connection-data @wdc-state))))
   (get-standard-connections [this]
@@ -265,11 +265,12 @@
       (<get-rows table increment-value filter-values)))
   (shutdown [this]
     @wdc-state)
-  (init [this phase preserved-state]
-    (swap! wdc-state deep-merge preserved-state)
+  (init [this phase state]
+    (swap! wdc-state deep-merge state)
     (swap! app-state merge {:show-ui? (#{"auth" "interactive"} phase)
                             :auth-only? (= "auth" phase)
-                            :called-by-tableau? true})))
+                            :called-by-tableau? true}))
+  (check-auth [this state done] (done)))
 
 (def wdc (DHIS2WDC.))
 (wdc/register! wdc)

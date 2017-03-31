@@ -75,11 +75,12 @@
   "Web Data Connector protocol"
   (get-auth-type [this] "AuthType")
   (get-name [this] "Connection name")
-  (get-table-infos [this] "Must return x conforming to ::tableInfos spec")
-  (get-standard-connections [this] "Must return x conforming to ::standardConnections spec")
-  (<get-rows [this table-info increment-value filter-values] "Must return a chan holding arrays of rows")
-  (shutdown [this] "Must return x conforming to ::state spec (data which needs to be persisted). Called when the current WDC phase ends.")
-  (init [this phase state] "Called when a new WDC phase is entered. ::state saved at the end of previous phase is provided."))
+  (get-table-infos [this] "Return a value conforming to `::tableInfos`")
+  (get-standard-connections [this] "Return a value conforming to `::standardConnections`")
+  (<get-rows [this table-info increment-value filter-values] "Return a `chan` holding arrays of rows")
+  (shutdown [this] "Called when the current WDC phase ends. Return state which needs to be persisted (must conform to `::state`).")
+  (init [this phase state] "Called when a new WDC phase is entered with `::state` saved at the end of previous phase.")
+  (check-auth [this state done] "Called to check whether auth credentials are valid. Call `done` with: no args if OK, error str if not"))
 
 ;; Set up spec/assert to check return values of the IWebDataConnector implementation
 ;;
@@ -103,6 +104,7 @@
 (def ^{:private true} -get-name get-name)
 (def ^{:private true} -<get-rows <get-rows)
 (def ^{:private true} -init init)
+(def ^{:private true} -check-auth check-auth)
 
 (defn get-phase
   "Returns the current WDC phase"
@@ -113,19 +115,24 @@
 
 (defn- tab-init [w callback]
   (let [phase (get-phase)
-        connection-data-str (aget js/tableau "connectionData")
-        username (aget js/tableau "username")
-        password (aget js/tableau "password")
-        state {:username username
-               :password password
-               :connection-data (when-not (empty? connection-data-str)
-                                  (js->clj (.parse js/JSON connection-data-str) :keywordize-keys true))}
-        auth-type (-get-auth-type w)]
+        state {:username (.-username js/tableau)
+               :password (.-password js/tableau)
+               :connection-data (some-> (.-connectionData js/tableau)
+                                        (not-empty)
+                                        (#(.parse js/JSON %))
+                                        (js->clj :keywordize-keys true))}
+        check-auth-cb (fn
+                        ([] (callback))
+                        ([error-str]
+                         (do (println (str "aborting for auth: " error-str))
+                             (.abortForAuth js/tableau error-str))))]
     (println (str "tab-init: entering phase: " phase))
-    (aset js/tableau "authType" auth-type)
-    (aset js/tableau "version" api-version)
-    (-init w phase state))
-  (callback))
+    (set! (.-authType js/tableau) (-get-auth-type w))
+    (set! (.-version js/tableau) api-version)
+    (-init w phase state)
+    (if (= phase "gatherData")
+      (-check-auth w state check-auth-cb)
+      (callback))))
 
 (defn- tab-shutdown [w callback]
   (println (str "tab-shutdown: exiting phase: " (get-phase)))
@@ -133,9 +140,9 @@
         connection-data-str (->> connection-data
                                  clj->js
                                  (.stringify js/JSON))]
-    (aset js/tableau "connectionData" connection-data-str)
-    (aset js/tableau "username" username)
-    (aset js/tableau "password" password))
+    (set! (.-connectionData js/tableau) connection-data-str)
+    (set! (.-username js/tableau) username)
+    (set! (.-password js/tableau) password))
   (callback))
 
 (defn- tab-get-schema [w callback]
@@ -181,5 +188,5 @@
   [w]
   {:pre [(satisfies? IWebDataConnector w)]}
   (tab-shutdown w #(println "shutdown callback"))
-  (aset js/tableau "connectionName" (-get-name w))
+  (set! (.-connectionName js/tableau) (-get-name w))
   (.submit js/tableau))
