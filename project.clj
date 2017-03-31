@@ -11,7 +11,7 @@
                  [org.clojure/core.async "0.3.442" :exclusions [org.clojure/tools.reader]]
                  [reagent "0.6.1"]
                  [cljs-http "0.1.42"]
-                 [cljsjs/tableauwdc "2.2.0-1"]]
+                 [cljs-wdc "0.1.0"]]
 
   :plugins [[lein-figwheel "0.5.9"]
             [lein-cljsbuild "1.1.5" :exclusions [[org.clojure/clojure]]]]
@@ -51,8 +51,6 @@
                 :compiler {:output-to "resources/public/js/compiled/dhis2_wdc.js"
                            :main dhis2-wdc.core
                            :optimizations :advanced
-                           ;:infer-externs true
-                           :externs ["src/externs.js"]
                            :elide-asserts true
                            :pretty-print false}}]}
 

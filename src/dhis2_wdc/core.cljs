@@ -1,7 +1,7 @@
 (ns dhis2-wdc.core
   (:require [cljs-http.client :as http]
             [cljs.core.async :as async]
-            [dhis2-wdc.wdc :as wdc]
+            [cljs-wdc.core :as wdc]
             [reagent.core :as r])
   (:require-macros
    [cljs.core.async.macros :as async]))
