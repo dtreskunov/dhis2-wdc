@@ -129,7 +129,8 @@
       (<paginate
        "/api/26/organisationUnits"
        {:query-params {:fields "id,level,featureType,displayName,coordinates"
-                       :level (:level org-unit-level)}}
+                       :level (:level org-unit-level)
+                       :pageSize 1000}}
        (fn [body]
          (->> body
               :organisationUnits
@@ -151,17 +152,17 @@
 (defn index-of "First index of item mapping k to v" [coll k v]
   (first (indices #(= v (k %)) coll)))
 
-(defn get-analytics-table [{:keys [period org-unit-level dimensions-map]}]
-  (let [dimensions (vals dimensions-map)
+(defn get-analytics-table [{:keys [period org-unit-level data-elements-map]}]
+  (let [data-elements (vals data-elements-map)
         endpoint "/api/26/analytics"
         query-params {:dimension ["co"
                                   (str "ou:LEVEL-" (:level org-unit-level))
                                   (str "pe:" (:id period))
-                                  (str "dx:" (clojure.string/join ";" (map :id dimensions)))]}]
+                                  (str "dx:" (clojure.string/join ";" (map :id data-elements)))]}]
     (reify ITable
       (table-info [_]
         {:id "analytics"
-         :alias "Selected data"
+         :alias "Selected Data"
          :description (str "Source endpoint: " endpoint " query params: " query-params)
          :columns (concat
                    [{:id "co"
@@ -184,7 +185,7 @@
                      :dataType "string"
                      :alias "Period (name)"}]
                    (map
-                    (fn [{:keys [id aggregationType displayName valueType] :as dimension}]
+                    (fn [{:keys [id aggregationType displayName valueType]}]
                       (let [agg-type (get {"AVERAGE" "avg"
                                            "COUNT" "count"
                                            "SUM" "sum"}
@@ -203,7 +204,7 @@
                          :dataType data-type
                          :alias displayName
                          :aggType agg-type}))
-                    dimensions))})
+                    data-elements))})
       (<get-rows [_ increment-value filter-values]
         (<paginate
          endpoint
@@ -413,17 +414,40 @@
        [:div.row
         [select-component a-selection a-items opts]]])))
 
-(defn get-dimensions-map [s cb]
-  (let [req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"]}
-                                 (when-not (clojure.string/blank? s)
-                                   {:filter (str "displayName:ilike:" s)}))}]
+(defn chan->cb [<chan cb]
+  (async/go-loop [all-items []]
+    (if-let [items (async/<! <chan)]
+      (recur (concat all-items items))
+      (cb all-items))))
+
+(defn get-datasets [cb]
+  (chan->cb
+   (<paginate
+    "/api/26/dataSets"
+    {:query-params {:fields ["id" "displayName" "dataSetElements[dataElement[id]]"]}}
+    :dataSets)
+   cb))
+
+(defn dataset-select-component [a-selection]
+  (let [initial-items [{:displayName "(All)"}]
+        a-items (r/atom initial-items)]
+    (get-datasets #(reset! a-items (concat initial-items %)))
+    [select-component a-selection a-items {:multiple? false :size 1}]))
+
+(defn get-data-elements [{:keys [id dataSetElements]} s cb]
+  (let [filters (concat (when-not (clojure.string/blank? s)
+                          [(str "displayName:ilike:" s)])
+                        (when id
+                          [(str "id:in:[" (clojure.string/join "," (map #(-> % :dataElement :id) dataSetElements)) "]")]))
+        req {:query-params (into {:fields ["id" "displayName" "valueType" "aggregationType"] :pageSize 1000}
+                                 (when (seq filters) {:filter filters}))}]
     (request
      "/api/26/dataElements"
      req
      (fn [body]
        (cb (:dataElements body))))))
 
-(defn dimensions-map-select-component [a-selection]
+(defn data-elements-map-select-component [a-selection get-items]
   (let [a-top (r/atom nil)
         a-bottom (r/atom nil)
         add! (fn [] (swap! a-selection merge @a-top))
@@ -431,9 +455,9 @@
     (fn []
       [:div
        [:div.form-group
-        [:label.col-sm-3.control-label "Available dimensions"]
+        [:label.col-sm-3.control-label "Available data elements"]
         [:div.col-sm-9
-         [select-filtered-component a-top get-dimensions-map {:filter? true :size 25}]]]
+         [select-filtered-component a-top get-items {:filter? true :size 25}]]]
        [:div.form-group
         [:div.col-sm-offset-3.col-sm-9
          [:div.btn-group
@@ -442,7 +466,7 @@
           [:button.btn.btn-default {:type "button" :on-click remove!}
            [:span.glyphicon.glyphicon-arrow-up]]]]]
        [:div.form-group
-        [:label.col-sm-3.control-label "Selected dimensions"]
+        [:label.col-sm-3.control-label "Selected data elements"]
         [:div.col-sm-9
          [select-component a-bottom (r/track #(sort-by :displayName (vals @a-selection))) {:size 5}]]]])))
 
@@ -472,7 +496,7 @@
 
 (defn data-missing? []
   (let [data (:connection-data @wdc-state)]
-    (some nil? [(first (:dimensions-map data))
+    (some nil? [(first (:data-elements-map data))
                 (:period data)
                 (:org-unit-level data)])))
 
@@ -480,7 +504,8 @@
   (let [data-missing (data-missing?)
         request-count (:request-count @app-state)
         requests-in-flight (> request-count 0)
-        disabled (or data-missing requests-in-flight)]
+        disabled (or data-missing requests-in-flight)
+        a-dataset (r/cursor wdc-state [:connection-data :dataset])]
     [:div.panel.panel-primary
      [:div.panel-heading (str "Welcome, " (get-in @wdc-state [:connection-data :user :displayName]) "!")]
      [:div.panel-body
@@ -495,13 +520,18 @@
         [:label.col-sm-3.control-label "Organisation Unit Level"]
         [:div.col-sm-9
          [org-unit-level-select-component (r/cursor wdc-state [:connection-data :org-unit-level])]]]
-       [dimensions-map-select-component (r/cursor wdc-state [:connection-data :dimensions-map])]
+       [:div.form-group
+        [:label.col-sm-3.control-label "Data set"]
+        [:div.col-sm-9
+         [dataset-select-component a-dataset]
+         [:small "Available data elements are filtered by data set."]]]
+       [data-elements-map-select-component (r/cursor wdc-state [:connection-data :data-elements-map]) #(get-data-elements @a-dataset %1 %2)]
        [:div.form-group
         [:label.col-sm-3.control-label
          (when requests-in-flight [:span.glyphicon.glyphicon-hourglass {:title (str request-count " requests")}])]
         [:div.col-sm-9
          [:button.btn.btn-default {:type "button" :disabled disabled :on-click #(wdc/go! wdc)} "Go!"]
-         (when data-missing [:div.small.error "Please select a period, organisation unit level, and some dimensions."])]]]
+         (when data-missing [:div.small.error "Please select a period, organisation unit level, and some data elements."])]]]
       [error-component]]]))
 
 (defn ui-component []
